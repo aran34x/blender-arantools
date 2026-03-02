@@ -338,6 +338,20 @@ class ARANTOOLS_PT_naming(Panel):
         col.prop(scene, 'arantools_inc', text='Counter (INC)')
         col.separator()
 
+        # Live preview
+        preview = scene.arantools_format
+        preview = preview.replace('N1', '0' + str(scene.arantools_n1))
+        preview = preview.replace('N2', '0' + str(scene.arantools_n2))
+        preview = preview.replace('N3', '0' + str(scene.arantools_n3))
+        preview = preview.replace('T1', scene.arantools_t1)
+        preview = preview.replace('T2', scene.arantools_t2)
+        preview = preview.replace('T3', scene.arantools_t3)
+        preview = preview.replace('T4', scene.arantools_t4)
+        preview = preview.replace('INC', '0' + str(scene.arantools_inc))
+        preview_box = col.box()
+        preview_box.label(text=preview if preview else "(empty)", icon='BONE_DATA')
+        col.separator()
+
         row = col.row(align=True)
         row.operator("arantools.rename_bone", text='Rename  (Alt+Shift+R)', icon='GREASEPENCIL')
         col.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
