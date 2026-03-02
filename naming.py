@@ -67,14 +67,14 @@ def register():
 
     # Scene properties
     bpy.types.Scene.arantools_format = bpy.props.StringProperty(
-        name='Format', default='T1_N1_T2_N2_T3_N3_T4')
+        name='Format', default='T1_INC')
     bpy.types.Scene.arantools_n1 = bpy.props.IntProperty(name='N1', default=0)
     bpy.types.Scene.arantools_n2 = bpy.props.IntProperty(name='N2', default=0)
     bpy.types.Scene.arantools_n3 = bpy.props.IntProperty(name='N3', default=0)
-    bpy.types.Scene.arantools_t1 = bpy.props.StringProperty(name='T1', default='finger')
-    bpy.types.Scene.arantools_t2 = bpy.props.StringProperty(name='T2', default='index')
+    bpy.types.Scene.arantools_t1 = bpy.props.StringProperty(name='T1', default='name')
+    bpy.types.Scene.arantools_t2 = bpy.props.StringProperty(name='T2', default='')
     bpy.types.Scene.arantools_t3 = bpy.props.StringProperty(name='T3', default='')
-    bpy.types.Scene.arantools_t4 = bpy.props.StringProperty(name='T4', default='l')
+    bpy.types.Scene.arantools_t4 = bpy.props.StringProperty(name='T4', default='')
     bpy.types.Scene.arantools_inc = bpy.props.IntProperty(name='INC', default=1)
 
     # Keymaps
