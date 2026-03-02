@@ -76,9 +76,36 @@ class ARANTOOLS_PT_rigging(Panel):
         # --- Feather Rigger ---
         box = layout.box()
         box.label(text="Feather Rigger", icon='OUTLINER_OB_CURVES')
-        box.label(text="Select mesh + armature (object mode),", icon='INFO')
-        box.label(text="mark sharp edges per feather island.", icon='INFO')
-        box.operator("arantools.rig_feathers", icon='AUTO')
+        fr = context.scene.arantools_feather_rig
+        col = box.column(align=True)
+        col.prop(fr, "target_armature")
+        col.separator()
+
+        col.label(text="Matching:", icon='CON_TRACKTO')
+        col.prop(fr, "pointer_method", text="Island Pointer")
+        col.prop(fr, "bone_target", text="Measure to")
+        col.separator()
+
+        col.label(text="Weighting:", icon='MOD_VERTEX_WEIGHT')
+        col.prop(fr, "weight_method", text="Method")
+        col.prop(fr, "chain_length")
+        col.prop(fr, "exclusive_chains")
+        col.separator()
+
+        col.label(text="Bone Filters:", icon='FILTER')
+        col.prop(fr, "use_selected_only")
+        row = col.row(align=True)
+        row.prop(fr, "filter_include", text="Include")
+        row = col.row(align=True)
+        row.prop(fr, "filter_exclude", text="Exclude")
+        col.separator()
+
+        run_row = col.row()
+        run_row.enabled = fr.target_armature is not None
+        run_row.scale_y = 1.4
+        run_row.operator("arantools.rig_feathers", icon='AUTO')
+        if fr.weight_method == 'ARP':
+            col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
         # --- Join & Bind (Advanced) ---
         box = layout.box()
