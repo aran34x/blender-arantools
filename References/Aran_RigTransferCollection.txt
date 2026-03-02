@@ -1,0 +1,335 @@
+bl_info = {
+    "name": "Batch Rig & Weight Transfer (Clean Stack)",
+    "author": "Gemini",
+    "version": (1, 8),
+    "blender": (3, 0, 0),
+    "location": "View3D > Sidebar > Rigging Tab",
+    "description": "Batch transfers rigs. Ensures Data Transfer is APPLIED so only the Armature modifier remains.",
+    "category": "Rigging",
+}
+
+import bpy
+import re
+
+# ------------------------------------------------------------------------
+#    Property Group
+# ------------------------------------------------------------------------
+class RT_BindingItem(bpy.types.PropertyGroup):
+    source_obj: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Source Mesh",
+        description="The mesh from the Source Collection"
+    )
+    
+    gt_obj: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Ground Truth",
+        description="Select the corresponding Ground Truth mesh"
+    )
+
+class RT_Properties(bpy.types.PropertyGroup):
+    source_collection: bpy.props.PointerProperty(
+        type=bpy.types.Collection,
+        name="Source Collection",
+        description="Collection containing the raw unrigged meshes"
+    )
+    
+    gt_collection: bpy.props.PointerProperty(
+        type=bpy.types.Collection,
+        name="Ground Truth Collection",
+        description="Collection containing the correctly rigged meshes"
+    )
+    
+    target_collection: bpy.props.PointerProperty(
+        type=bpy.types.Collection,
+        name="Target Collection",
+        description="Where the final rigged meshes will be placed"
+    )
+    
+    apply_modifiers: bpy.props.BoolProperty(
+        name="Apply Modifiers",
+        description="Bake existing modifiers (Mirror, Subsurf) before rigging?",
+        default=True
+    )
+
+    transfer_method: bpy.props.EnumProperty(
+        name="Transfer Method",
+        description="Method used to calculate weights",
+        items=[
+            ('NEAREST', "Nearest Vertex", "Fastest, 1-to-1 vertex matching"),
+            ('POLYINTERP_NEAREST', "Nearest Face Interpolated", "Smoother, best for general rigging"),
+            ('POLYINTERP_VNORPROJ', "Projected Face Interpolated", "Good for clothing layers"),
+            ('TOPOLOGY', "Topology", "Requires identical vertex count/order"),
+        ],
+        default='POLYINTERP_NEAREST'
+    )
+
+    
+    binding_list: bpy.props.CollectionProperty(type=RT_BindingItem)
+    binding_index: bpy.props.IntProperty() 
+
+# ------------------------------------------------------------------------
+#    Operator: Populate List
+# ------------------------------------------------------------------------
+class RT_OT_PopulateList(bpy.types.Operator):
+    """Load meshes and match using Reverse Token Priority"""
+    bl_idname = "rt.populate_list"
+    bl_label = "Load & Smart Match"
+    
+    def execute(self, context):
+        props = context.scene.rt_props
+        source_col = props.source_collection
+        gt_col = props.gt_collection
+        
+        if not source_col:
+            self.report({'ERROR'}, "Please select a Source Collection first.")
+            return {'CANCELLED'}
+        
+        props.binding_list.clear()
+        
+        gt_objects = []
+        if gt_col:
+            gt_objects = [o for o in gt_col.all_objects if o.type == 'MESH']
+        
+        count = 0
+        matches_found = 0
+        
+        def get_clean_tokens(name):
+            clean_name = name.lower()
+            ignore_list = ["_rgt", "_rig", "_rigged", "_baked", "_lod0", "_lod1", "_low", "_high", ".001", ".002"]
+            for ignore in ignore_list:
+                clean_name = clean_name.replace(ignore, "")
+            tokens = re.split(r'[^a-z0-9]', clean_name)
+            return [t for t in tokens if t] 
+
+        def gt_contains_token(gt_obj, token):
+            gt_tokens = get_clean_tokens(gt_obj.name)
+            return token in gt_tokens
+
+        for obj in source_col.all_objects:
+            if obj.type == 'MESH':
+                item = props.binding_list.add()
+                item.source_obj = obj
+                count += 1
+                
+                if gt_objects:
+                    src_tokens = get_clean_tokens(obj.name)
+                    src_tokens_reversed = src_tokens[::-1]
+                    found_match = None
+                    
+                    # Leaf Priority Strategy
+                    for token in src_tokens_reversed:
+                        possible_matches = []
+                        for gt in gt_objects:
+                            if gt_contains_token(gt, token):
+                                possible_matches.append(gt)
+                        
+                        if len(possible_matches) == 1:
+                            found_match = possible_matches[0]
+                            break
+                        elif len(possible_matches) > 1:
+                            best_candidate = possible_matches[0]
+                            max_overlap = 0
+                            for cand in possible_matches:
+                                cand_tokens = set(get_clean_tokens(cand.name))
+                                src_set = set(src_tokens)
+                                overlap = len(cand_tokens.intersection(src_set))
+                                if overlap > max_overlap:
+                                    max_overlap = overlap
+                                    best_candidate = cand
+                            found_match = best_candidate
+                            break
+                    
+                    if not found_match:
+                        best_score = -1
+                        src_set = set(src_tokens)
+                        for gt in gt_objects:
+                            gt_set = set(get_clean_tokens(gt.name))
+                            score = len(src_set.intersection(gt_set))
+                            if score > best_score and score > 0:
+                                best_score = score
+                                found_match = gt
+
+                    if found_match:
+                        item.gt_obj = found_match
+                        matches_found += 1
+
+        self.report({'INFO'}, f"Loaded {count} meshes. Matched {matches_found}.")
+        return {'FINISHED'}
+
+# ------------------------------------------------------------------------
+#    Operator: Execute Rigging (Reordered)
+# ------------------------------------------------------------------------
+class RT_OT_ExecuteRigging(bpy.types.Operator):
+    """Duplicate -> Apply Mods -> Data Transfer (Apply) -> Armature"""
+    bl_idname = "rt.execute_rigging"
+    bl_label = "Batch Rig & Transfer"
+    
+    def execute(self, context):
+        props = context.scene.rt_props
+        target_col = props.target_collection
+        apply_mods = props.apply_modifiers
+        
+        if not target_col:
+            self.report({'ERROR'}, "Please select a Target Collection.")
+            return {'CANCELLED'}
+            
+        processed_count = 0
+        
+        def find_armature(obj):
+            if obj.parent and obj.parent.type == 'ARMATURE':
+                return obj.parent
+            for mod in obj.modifiers:
+                if mod.type == 'ARMATURE' and mod.object:
+                    return mod.object
+            return None
+
+        bpy.ops.object.select_all(action='DESELECT')
+
+        for item in props.binding_list:
+            src = item.source_obj
+            gt = item.gt_obj
+            
+            if not src or not gt:
+                continue
+            
+            # --- STEP 1: Duplicate ---
+            new_obj = src.copy()
+            new_obj.name = f"{src.name}_Rigged"
+            new_obj.data = new_obj.data.copy()
+            
+            if not apply_mods:
+                new_obj.data = src.data.copy()
+            
+            if new_obj.name not in target_col.objects:
+                target_col.objects.link(new_obj)
+            
+            # Activate for operations
+            context.view_layer.objects.active = new_obj
+            new_obj.select_set(True)
+            
+            # --- STEP 2: Apply Existing Modifiers ---
+            if apply_mods:
+                try:
+                    bpy.ops.object.convert(target='MESH')
+                except RuntimeError:
+                    pass
+
+            # --- STEP 3: Data Transfer (Weights) ---
+            # We do this BEFORE adding the armature to ensure the stack is clean
+            dt_mod = new_obj.modifiers.new(name="DataTransfer", type='DATA_TRANSFER')
+            dt_mod.object = gt
+            dt_mod.use_vert_data = True
+            dt_mod.data_types_verts = {'VGROUP_WEIGHTS'}
+            dt_mod.vert_mapping = props.transfer_method 
+            
+            context.view_layer.update() # Force update
+            
+            try:
+                # Generate Layers
+                with context.temp_override(object=new_obj):
+                    bpy.ops.object.datalayout_transfer(modifier=dt_mod.name)
+                
+                # Apply Modifier IMMEDIATELY
+                with context.temp_override(object=new_obj):
+                    bpy.ops.object.modifier_apply(modifier=dt_mod.name)
+            except Exception as e:
+                print(f"Transfer failed on {new_obj.name}: {e}")
+
+            # --- STEP 4: Armature & Parenting ---
+            armature = find_armature(gt)
+            if armature:
+                new_obj.parent = armature
+                # Since we applied everything else, this should be the ONLY modifier now
+                mod_arm = new_obj.modifiers.new(name="Armature", type='ARMATURE')
+                mod_arm.object = armature
+            
+            new_obj.select_set(False)
+            processed_count += 1
+            
+        self.report({'INFO'}, f"Processed {processed_count} meshes.")
+        return {'FINISHED'}
+
+# ------------------------------------------------------------------------
+#    UI Panel
+# ------------------------------------------------------------------------
+class RT_PT_Panel(bpy.types.Panel):
+    bl_label = "Batch Rig Transfer"
+    bl_idname = "RT_PT_Panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Rigging' 
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.rt_props
+        
+        box = layout.box()
+        box.label(text="Setup Collections", icon='OUTLINER_COLLECTION')
+        box.prop(props, "source_collection")
+        box.prop(props, "gt_collection")
+        box.prop(props, "target_collection")
+        
+        opt_box = layout.box()
+        opt_box.label(text="Options", icon='PREFERENCES')
+        opt_box.prop(props, "apply_modifiers")
+        opt_box.prop(props, "transfer_method")
+        
+        layout.separator()
+        
+        if props.source_collection:
+            layout.operator("rt.populate_list", icon='FILE_REFRESH', text="Load & Match")
+        
+        if len(props.binding_list) > 0:
+            layout.label(text="Map Source to Ground Truth:")
+            
+            row = layout.row()
+            col = row.column()
+            
+            col.template_list(
+                "RT_UL_BindingList", "", 
+                props, "binding_list", 
+                props, "binding_index",
+                rows=5
+            )
+            
+            layout.separator()
+            
+            btn = layout.operator("rt.execute_rigging", icon='ARMATURE_DATA')
+            if not props.target_collection:
+                layout.label(text="Select Target Collection!", icon='ERROR')
+                btn.enabled = False
+
+class RT_UL_BindingList(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
+        split = layout.split(factor=0.45)
+        if item.source_obj:
+            split.label(text=item.source_obj.name, icon='MESH_DATA')
+        else:
+            split.label(text="Missing", icon='ERROR')
+        split.prop(item, "gt_obj", text="")
+
+# ------------------------------------------------------------------------
+#    Registration
+# ------------------------------------------------------------------------
+classes = (
+    RT_BindingItem,
+    RT_Properties,
+    RT_OT_PopulateList,
+    RT_OT_ExecuteRigging,
+    RT_PT_Panel,
+    RT_UL_BindingList,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.rt_props = bpy.props.PointerProperty(type=RT_Properties)
+
+def unregister():
+    del bpy.types.Scene.rt_props
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+if __name__ == "__main__":
+    register()

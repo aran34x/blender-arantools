@@ -1,0 +1,222 @@
+bl_info = {
+    "name": "Contact Flooder",
+    "location": "View3D > Sidebar > Rigging",
+    "category": "Rigging",
+    "blender": (3, 4, 0)
+}
+
+import bpy
+from mathutils import Vector
+
+def get_weights_from_index(source, poly_index, hit_location_local):
+    """
+    Given a known polygon index on the source, find the nearest vertex 
+    within that polygon and return its weights.
+    """
+    weights = {}
+    if poly_index is None or poly_index < 0 or poly_index >= len(source.data.polygons):
+        return weights
+
+    poly = source.data.polygons[poly_index]
+    best_v_idx = -1
+    min_d = float('inf')
+    
+    for v_idx in poly.vertices:
+        v_co = source.data.vertices[v_idx].co
+        dist = (v_co - hit_location_local).length
+        if dist < min_d:
+            min_d = dist
+            best_v_idx = v_idx
+            
+    if best_v_idx == -1: return weights
+
+    for g in source.data.vertices[best_v_idx].groups:
+        try:
+            g_name = source.vertex_groups[g.group].name
+            weights[g_name] = g.weight
+        except IndexError: continue
+            
+    return weights
+
+def main_flood(self, context, props):
+    source = props.source
+    if not source: 
+        self.report({'ERROR'}, "No Source Object selected")
+        return {'CANCELLED'}
+    
+    # Switch to Object mode to process selections
+    if context.object and context.object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Separate loose parts (Selection state is preserved on new objects)
+    bpy.ops.mesh.separate(type='LOOSE')
+    
+    meshes = [o for o in context.selected_objects if o.type == 'MESH' and o != source]
+    
+    source_mx = source.matrix_world
+    source_imx = source_mx.inverted_safe()
+
+    uv_layer_name = props.uv_name
+    
+    for mesh in meshes:
+        mesh_mx = mesh.matrix_world
+        
+        # --- DETERMINE CANDIDATE VERTICES ---
+        # Which vertices should we check to find the "Anchor" point?
+        candidate_indices = []
+        
+        # 1. OPTION: SELECTED VERTICES
+        if props.use_selection:
+            # Get all vertices that are currently selected
+            candidate_indices = [v.index for v in mesh.data.vertices if v.select]
+        
+        # 2. OPTION: UV EXTREMES (Fallback if selection is empty or disabled)
+        if not candidate_indices and props.use_uv:
+            if uv_layer_name in mesh.data.uv_layers:
+                uv_data = mesh.data.uv_layers[uv_layer_name].data
+                best_val = float('-inf') if props.uv_direction == 'MAX' else float('inf')
+                target_v_idx = -1
+                
+                for loop in mesh.data.loops:
+                    uv = uv_data[loop.index].uv
+                    val = uv.x if props.uv_axis == 'U' else uv.y
+                    
+                    if props.uv_direction == 'MAX':
+                        if val > best_val:
+                            best_val = val
+                            target_v_idx = loop.vertex_index
+                    else: # MIN
+                        if val < best_val:
+                            best_val = val
+                            target_v_idx = loop.vertex_index
+                
+                if target_v_idx != -1:
+                    candidate_indices = [target_v_idx]
+        
+        # 3. FALLBACK: ALL VERTICES (If nothing else worked)
+        if not candidate_indices:
+            candidate_indices = range(len(mesh.data.vertices))
+
+        # --- RAYCAST ---
+        best_poly_index = -1
+        best_hit_local = None
+        min_dist_to_source = float('inf')
+        
+        for i in candidate_indices:
+            v = mesh.data.vertices[i]
+            v_world = mesh_mx @ v.co
+            v_in_source = source_imx @ v_world
+            
+            result = source.closest_point_on_mesh(v_in_source)
+            if not result[0]: continue 
+            
+            hit_loc_local = result[1]
+            hit_poly_idx = result[3]
+            
+            # Distance check (We always want the closest point among candidates)
+            world_hit = source_mx @ hit_loc_local
+            dist = (v_world - world_hit).length
+            
+            if dist < min_dist_to_source:
+                min_dist_to_source = dist
+                best_poly_index = hit_poly_idx
+                best_hit_local = hit_loc_local
+
+        if best_poly_index == -1: continue
+        
+        # --- APPLY WEIGHTS ---
+        w_data = get_weights_from_index(source, best_poly_index, best_hit_local)
+        
+        for name, val in w_data.items():
+            if name not in mesh.vertex_groups: mesh.vertex_groups.new(name=name)
+            vg = mesh.vertex_groups[name]
+            all_indices = [v.index for v in mesh.data.vertices]
+            
+            if props.blend >= 0.99:
+                if val > 0.001: vg.add(all_indices, val, 'REPLACE')
+                else: vg.remove(all_indices)
+            else:
+                for v in mesh.data.vertices:
+                    old_w = 0.0
+                    try: old_w = vg.weight(v.index)
+                    except RuntimeError: pass 
+                    final_w = (val * props.blend) + (old_w * (1.0 - props.blend))
+                    if final_w > 0.001: vg.add([v.index], final_w, 'REPLACE')
+                    else: vg.remove([v.index])
+
+    if meshes:
+        context.view_layer.objects.active = meshes[0]
+        bpy.ops.object.join()
+        # Restore Edit Mode if that's where we started
+        # bpy.ops.object.mode_set(mode='EDIT') 
+        self.report({'INFO'}, f"Flooded Weights")
+    
+    return {'FINISHED'}
+
+class FloodProps(bpy.types.PropertyGroup):
+    source: bpy.props.PointerProperty(name="Source", type=bpy.types.Object, poll=lambda s,o: o.type=='MESH')
+    blend: bpy.props.FloatProperty(name="Blend", default=1.0, min=0.0, max=1.0)
+    
+    # SELECTION Control
+    use_selection: bpy.props.BoolProperty(
+        name="Use Selected Verts", 
+        default=True, 
+        description="If vertices are selected, use ONLY them to find the contact point."
+    )
+    
+    # UV Controls
+    use_uv: bpy.props.BoolProperty(name="Use UV Fallback", default=False, description="If no selection, use UV extremes.")
+    uv_name: bpy.props.StringProperty(name="UV Map", default="UVMap")
+    uv_axis: bpy.props.EnumProperty(name="Axis", items=[('U', "U", ""), ('V', "V", "")], default='V')
+    uv_direction: bpy.props.EnumProperty(name="Direction", items=[('MIN', "Min", ""), ('MAX', "Max", "")], default='MIN')
+
+class OBJECT_OT_flood(bpy.types.Operator):
+    bl_idname = "object.contact_flood"
+    bl_label = "Flood Weights"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context): return main_flood(self, context, context.scene.flood_props)
+
+class VIEW3D_PT_flood(bpy.types.Panel):
+    bl_label = "Contact Flooder"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Rigging"
+    
+    def draw(self, context):
+        l = self.layout
+        p = context.scene.flood_props
+        
+        l.prop(p, "source")
+        l.prop(p, "blend", slider=True)
+        
+        l.separator()
+        l.label(text="Method Priority:")
+        l.prop(p, "use_selection")
+        
+        l.prop(p, "use_uv")
+        if p.use_uv:
+            box = l.box()
+            box.prop(p, "uv_name")
+            r = box.row()
+            r.prop(p, "uv_axis", expand=True)
+            r.prop(p, "uv_direction", expand=True)
+        
+        l.separator()
+        r = l.row()
+        r.enabled = bool(p.source)
+        r.operator("object.contact_flood")
+
+def register():
+    bpy.utils.register_class(FloodProps)
+    bpy.utils.register_class(OBJECT_OT_flood)
+    bpy.utils.register_class(VIEW3D_PT_flood)
+    bpy.types.Scene.flood_props = bpy.props.PointerProperty(type=FloodProps)
+
+def unregister():
+    del bpy.types.Scene.flood_props
+    bpy.utils.unregister_class(VIEW3D_PT_flood)
+    bpy.utils.unregister_class(OBJECT_OT_flood)
+    bpy.utils.unregister_class(FloodProps)
+
+if __name__ == "__main__":
+    register()

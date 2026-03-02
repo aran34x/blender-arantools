@@ -1,0 +1,93 @@
+import bpy
+
+# -----------------------------
+
+# -----------------------------
+
+obj = bpy.context.active_object
+if not obj or obj.type != 'MESH':
+    print("No valid mesh object selected.")
+else:
+    # Make sure we're in Object Mode so me.vertices[...] data is up-to-date
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    me = obj.data
+
+    # 1) Build adjacency list for each vertex
+    adjacency = [[] for _ in me.vertices]
+    for e in me.edges:
+        v1, v2 = e.vertices
+        adjacency[v1].append(v2)
+        adjacency[v2].append(v1)
+
+    # 2) Find connected "islands" via a DFS
+    visited = set()
+    islands = []
+    for v_idx in range(len(me.vertices)):
+        if v_idx not in visited:
+            stack = [v_idx]
+            island = set()
+            visited.add(v_idx)
+            while stack:
+                cur = stack.pop()
+                island.add(cur)
+                for neigh in adjacency[cur]:
+                    if neigh not in visited:
+                        visited.add(neigh)
+                        stack.append(neigh)
+            islands.append(island)
+
+    # 3) For each island, find the first sharp edge
+    for island in islands:
+        sharp_edge = None
+        for e in me.edges:
+            v1, v2 = e.vertices
+            if v1 in island and v2 in island and e.use_edge_sharp:
+                sharp_edge = e
+                break
+
+        if not sharp_edge:
+            # No sharp edge => skip
+            continue
+
+        # 4) Source vertex is the first vertex of that sharp edge
+        source_vert_idx = sharp_edge.vertices[0]
+
+        # Pre-fetch each vertex group's weight for the source vertex
+        source_weights = {}
+        for vg in obj.vertex_groups:
+            try:
+                w = vg.weight(source_vert_idx)
+            except RuntimeError:
+                w = 0.0
+            source_weights[vg.index] = w
+
+        # 5) Apply blended weights to each vertex in the island
+        #    (optionally skip if not selected)
+        for vg in obj.vertex_groups:
+            new_weight_list = []
+            for v_idx in island:
+                # If only_selected == True, skip if this vertex is not selected
+                if only_selected and not me.vertices[v_idx].select:
+                    continue
+
+                # Attempt to get the old weight
+                try:
+                    old_w = vg.weight(v_idx)
+                except RuntimeError:
+                    old_w = 0.0
+
+                src_w = source_weights[vg.index]
+                # Blend: old_w * (1 - f) + src_w * f
+                blended_w = old_w * (1 - blend_factor) + src_w * blend_factor
+
+                # We'll store this vertex so we can do .add() in one step
+                # (But note: .add() only accepts one weight for the entire list,
+                #  so we must do them individually if they differ.)
+                new_weight_list.append((v_idx, blended_w))
+
+            # Now apply the new weights individually
+            for v_idx, w in new_weight_list:
+                vg.add([v_idx], w, 'REPLACE')
+
+    print("Finished applying blended weights from the first sharp edge in each island.")

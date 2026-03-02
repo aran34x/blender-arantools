@@ -1,0 +1,226 @@
+bl_info = {
+    "name": "ARP Batch Export (Single Preview)",
+    "author": "Gemini",
+    "version": (1, 5),
+    "blender": (3, 0, 0),
+    "location": "View3D > Sidebar > ARP Batch",
+    "description": "Batch export with single-object vertical preview",
+    "category": "Import-Export",
+}
+
+import bpy
+import os
+
+# --- Helper Function for Naming Logic ---
+def get_final_filename(original_name, props):
+    """Calculates the final filename based on user settings."""
+    name = original_name
+    
+    # 1. Multi-Filter (Remove) text
+    if props.remove_str:
+        tokens = [t.strip() for t in props.remove_str.split(',')]
+        for token in tokens:
+            if token: 
+                name = name.replace(token, "")
+        
+    # 2. Add Prefix and Suffix
+    final_name = f"{props.prefix_str}{name}{props.suffix_str}"
+    
+    # 3. Clean for filesystem
+    return bpy.path.clean_name(final_name)
+
+
+class ARP_Batch_Properties(bpy.types.PropertyGroup):
+    target_armature: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Armature",
+        description="Select the Auto-Rig Pro Armature",
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    
+    export_folder: bpy.props.StringProperty(
+        name="Export Folder",
+        description="Folder where FBX files will be saved",
+        default="//",
+        subtype='DIR_PATH'
+    )
+    
+    # --- Naming Controls ---
+    remove_str: bpy.props.StringProperty(
+        name="Remove Text",
+        description="Text to remove. Separate multiple strings with commas",
+        default=""
+    )
+    
+    prefix_str: bpy.props.StringProperty(
+        name="Prefix",
+        description="Add this text to the start of the filename",
+        default=""
+    )
+    
+    suffix_str: bpy.props.StringProperty(
+        name="Suffix",
+        description="Add this text to the end of the filename",
+        default=""
+    )
+
+class ARP_OT_BatchExport(bpy.types.Operator):
+    """Batch Export Selected Objects using Auto-Rig Pro"""
+    bl_idname = "arp.batch_export_tool"
+    bl_label = "Batch Export Objects"
+    
+    def execute(self, context):
+        scene = context.scene
+        props = scene.arp_batch_props
+        
+        armature = props.target_armature
+        folder_path = bpy.path.abspath(props.export_folder)
+        
+        # --- Validation ---
+        if not armature:
+            self.report({'ERROR'}, "Please select the Armature in the panel first!")
+            return {'CANCELLED'}
+            
+        if not os.path.exists(folder_path):
+            self.report({'ERROR'}, f"Export folder does not exist: {folder_path}")
+            return {'CANCELLED'}
+
+        # Get meshes (Selected objects excluding the armature)
+        objects_to_process = [obj for obj in context.selected_objects if obj != armature and obj.type == 'MESH']
+        
+        if not objects_to_process:
+            self.report({'WARNING'}, "No mesh objects selected.")
+            return {'CANCELLED'}
+
+        count = 0
+        
+        # --- Export Loop ---
+        for obj in objects_to_process:
+            try:
+                # 1. Selection Handling
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                armature.select_set(True)
+                context.view_layer.objects.active = armature
+                
+                # 2. Calculate Name
+                filename = get_final_filename(obj.name, props)
+                
+                if not filename.strip():
+                    print(f"Skipping {obj.name} (Resulting filename is empty)")
+                    continue
+                    
+                filepath = os.path.join(folder_path, f"{filename}.fbx")
+                print(f"Exporting: {obj.name} -> {filename}.fbx")
+
+                # 3. Call Auto-Rig Pro
+                bpy.ops.arp.arp_export_fbx_panel(filepath=filepath)
+                
+                count += 1
+                
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed: {obj.name}. {e}")
+                print(f"Error on {obj.name}: {e}")
+
+        # --- Restore State ---
+        bpy.ops.object.select_all(action='DESELECT')
+        armature.select_set(True)
+        context.view_layer.objects.active = armature
+
+        self.report({'INFO'}, f"Exported {count} files successfully.")
+        return {'FINISHED'}
+
+class ARP_PT_BatchPanel(bpy.types.Panel):
+    """Creates a Panel in the Sidebar"""
+    bl_label = "ARP Batch Export"
+    bl_idname = "ARP_PT_batch_export"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'ARP Batch'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        props = scene.arp_batch_props
+
+        # 1. Setup
+        layout.label(text="Setup:", icon='PREFERENCES')
+        box = layout.box()
+        box.prop(props, "target_armature")
+        box.prop(props, "export_folder")
+        
+        # 2. Naming Rules
+        layout.label(text="Naming Rules:", icon='SORTALPHA')
+        box = layout.box()
+        
+        col = box.column(align=True)
+        col.label(text="Remove (comma separated):")
+        col.prop(props, "remove_str", text="")
+        
+        col.separator()
+        
+        split = col.split(factor=0.5)
+        split.prop(props, "prefix_str", text="Prefix")
+        split.prop(props, "suffix_str", text="Suffix")
+        
+        layout.separator()
+        
+        # 3. Export Button
+        row = layout.row()
+        row.scale_y = 1.5
+        row.operator("arp.batch_export_tool", icon='EXPORT')
+        
+        layout.separator()
+
+        # 4. Vertical Preview Section (SINGLE ITEM ONLY)
+        selected_meshes = [obj for obj in context.selected_objects 
+                           if obj != props.target_armature and obj.type == 'MESH']
+        
+        if selected_meshes:
+            # Only take the first one
+            obj = selected_meshes[0]
+            
+            box_main = layout.box()
+            box_main.label(text=f"Preview (1 of {len(selected_meshes)} selected):", icon='FILE_TEXT')
+            
+            final_name = get_final_filename(obj.name, props)
+            
+            # Create a sub-box for the single item
+            row_box = box_main.box()
+            col = row_box.column()
+            
+            # Original Name
+            row1 = col.row()
+            row1.alignment = 'LEFT'
+            row1.label(text=f"Org: {obj.name}", icon='OBJECT_DATAMODE')
+            
+            # Final Name
+            row2 = col.row()
+            row2.alignment = 'LEFT'
+            if not final_name:
+                row2.label(text="New: [EMPTY NAME WARNING]", icon='ERROR')
+            else:
+                row2.label(text=f"New: {final_name}.fbx", icon='FORWARD')
+
+        else:
+            layout.label(text="Select meshes to see preview", icon='INFO')
+
+# --- Registration ---
+classes = (
+    ARP_Batch_Properties,
+    ARP_OT_BatchExport,
+    ARP_PT_BatchPanel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.arp_batch_props = bpy.props.PointerProperty(type=ARP_Batch_Properties)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.arp_batch_props
+
+if __name__ == "__main__":
+    register()

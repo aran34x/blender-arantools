@@ -1,0 +1,254 @@
+# bl_info allows Blender to recognize the script as an add-on.
+bl_info = {
+    "name": "Weight Tools",
+    "author": "Gemini",
+    "version": (1, 4),
+    "blender": (3, 0, 0),
+    "location": "View3D > Sidebar > Edit > Weight Tools",
+    "description": "A collection of tools for manipulating vertex weights in Edit Mode.",
+    "warning": "",
+    "doc_url": "",
+    "category": "Mesh",
+}
+
+import bpy
+import bmesh
+import mathutils
+from bpy.props import FloatProperty, PointerProperty
+from bpy.types import PropertyGroup
+
+# --- Properties ---
+# A single PropertyGroup to hold all settings for our tools.
+class WeightToolsSettings(PropertyGroup):
+    # --- Properties for the Averaging Tool ---
+    average_mix_factor: FloatProperty(
+        name="Factor",
+        description="How much to blend the average weight. 0 is no change, 1 is full average",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+    )
+    
+    # --- Properties for the Copying Tool ---
+    source_object: PointerProperty(
+        name="Source",
+        description="The mesh object to copy weights from",
+        type=bpy.types.Object,
+        # The poll function ensures only MESH objects other than the active one can be selected.
+        poll=lambda self, object: object.type == 'MESH' and object != bpy.context.active_object
+    )
+    copy_mix_factor: FloatProperty(
+        name="Factor",
+        description="How much to blend the copied weight. 0 is no change, 1 is full copy",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+    )
+
+# --- Operator 1: Average Weights ---
+class MESH_OT_average_island_weights(bpy.types.Operator):
+    """Averages vertex weights across each selected mesh island"""
+    bl_idname = "mesh.average_island_weights"
+    bl_label = "Average Selected Weights"
+    bl_description = "For each island in the selection, calculate the average weight for each vertex group and apply it to the whole island"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object is not None and
+                context.active_object.type == 'MESH' and
+                context.mode == 'EDIT_MESH')
+
+    def execute(self, context):
+        settings = context.scene.weight_tools_settings
+        mix_factor = settings.average_mix_factor
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+
+        selected_verts = {v for v in bm.verts if v.select}
+        if not selected_verts:
+            self.report({'WARNING'}, "No vertices selected")
+            return {'CANCELLED'}
+
+        deform_layer = bm.verts.layers.deform.verify()
+        visited_verts = set()
+
+        for vert in selected_verts:
+            if vert in visited_verts:
+                continue
+
+            island_verts = []
+            q = [vert]
+            queued_verts = {vert}
+            while q:
+                v_curr = q.pop(0)
+                island_verts.append(v_curr)
+                visited_verts.add(v_curr)
+                for edge in v_curr.link_edges:
+                    v_other = edge.other_vert(v_curr)
+                    if v_other in selected_verts and v_other not in queued_verts:
+                        q.append(v_other)
+                        queued_verts.add(v_other)
+            
+            if not island_verts:
+                continue
+
+            num_island_verts = len(island_verts)
+            for vgroup in obj.vertex_groups:
+                vg_index = vgroup.index
+                total_weight = sum(iv[deform_layer].get(vg_index, 0.0) for iv in island_verts)
+                average_weight = total_weight / num_island_verts if num_island_verts > 0 else 0.0
+
+                for island_vert in island_verts:
+                    original_weight = island_vert[deform_layer].get(vg_index, 0.0)
+                    interpolated_weight = original_weight + (average_weight - original_weight) * mix_factor
+                    island_vert[deform_layer][vg_index] = interpolated_weight
+        
+        bmesh.update_edit_mesh(obj.data)
+        self.report({'INFO'}, f"Averaged weights on selection with factor: {mix_factor:.2f}")
+        return {'FINISHED'}
+
+# --- Operator 2: Copy Closest Weights ---
+class MESH_OT_copy_closest_weights(bpy.types.Operator):
+    """Copies weights from the closest point on a source mesh to the selected vertices"""
+    bl_idname = "mesh.copy_closest_weights"
+    bl_label = "Copy from Closest"
+    bl_description = "For each selected vertex, copy weights from the closest point on the Source mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object is not None and
+                context.active_object.type == 'MESH' and
+                context.mode == 'EDIT_MESH')
+
+    def execute(self, context):
+        settings = context.scene.weight_tools_settings
+        target_obj = context.active_object
+        source_obj = settings.source_object
+        mix_factor = settings.copy_mix_factor
+
+        if not source_obj:
+            self.report({'ERROR'}, "No source object selected")
+            return {'CANCELLED'}
+
+        # --- Setup ---
+        bm_target = bmesh.from_edit_mesh(target_obj.data)
+        selected_target_verts = [v for v in bm_target.verts if v.select]
+
+        if not selected_target_verts:
+            self.report({'WARNING'}, "No vertices selected on target mesh")
+            return {'CANCELLED'}
+            
+        # Create a BVH tree from the source mesh for fast lookups
+        # Using the evaluated mesh ensures modifiers are accounted for.
+        depsgraph = context.evaluated_depsgraph_get()
+        source_eval = source_obj.evaluated_get(depsgraph)
+        source_mesh = source_eval.to_mesh()
+        bvh = mathutils.bvhtree.BVHTree.FromPolygons(source_mesh.vertices, source_mesh.polygons)
+
+        # Get vertex group names and deform layers
+        target_deform_layer = bm_target.verts.layers.deform.verify()
+        source_deform_layer = source_mesh.vertex_groups.active # Not a bmesh, access directly
+        source_vgs = {vg.name: vg.index for vg in source_obj.vertex_groups}
+
+        # --- Main Loop ---
+        for target_vert in selected_target_verts:
+            # Convert target vertex to world space, then to source's local space
+            target_world_co = target_obj.matrix_world @ target_vert.co
+            target_co_in_source_space = source_obj.matrix_world.inverted() @ target_world_co
+
+            # Find the closest point on the source mesh surface
+            location, normal, face_index, distance = bvh.find_nearest(target_co_in_source_space)
+
+            if face_index is not None:
+                source_poly = source_mesh.polygons[face_index]
+                
+                # Get the vertices of the found polygon on the source mesh
+                poly_verts_indices = source_poly.vertices
+                poly_verts_cos = [source_mesh.vertices[i].co for i in poly_verts_indices]
+                
+                # Calculate interpolation weights for the point on the polygon
+                interp_weights = mathutils.interpolate.poly_3d_calc(poly_verts_cos, location)
+
+                # --- Apply weights for each group ---
+                for target_vg in target_obj.vertex_groups:
+                    if target_vg.name in source_vgs:
+                        source_vg_index = source_vgs[target_vg.name]
+                        
+                        # Get weights of the source polygon's vertices for the current group
+                        source_weights = []
+                        for i, vert_index in enumerate(poly_verts_indices):
+                            try:
+                                source_weights.append(source_mesh.vertices[vert_index].groups.get(source_vg_index).weight)
+                            except (AttributeError, IndexError):
+                                source_weights.append(0.0) # Vertex not in group
+
+                        # Interpolate the final weight
+                        copied_weight = sum(i[0] * i[1] for i in zip(interp_weights, source_weights))
+                        
+                        # Mix with original weight
+                        original_weight = target_vert[target_deform_layer].get(target_vg.index, 0.0)
+                        final_weight = original_weight + (copied_weight - original_weight) * mix_factor
+                        target_vert[target_deform_layer][target_vg.index] = final_weight
+        
+        # Cleanup the temporary mesh
+        source_eval.to_mesh_clear()
+        bmesh.update_edit_mesh(target_obj.data)
+        self.report({'INFO'}, f"Copied weights from '{source_obj.name}'")
+        return {'FINISHED'}
+
+# --- UI Panel ---
+class VIEW3D_PT_weight_tools(bpy.types.Panel):
+    """Creates the main panel in the 3D Viewport Sidebar"""
+    bl_label = "Weight Tools"
+    bl_idname = "VIEW3D_PT_weight_tools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Edit'
+    bl_context = "mesh_edit"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.weight_tools_settings
+
+        # --- Averaging Box ---
+        avg_box = layout.box()
+        avg_box.label(text="Average Island Weights", icon='MOD_VERTEX_WEIGHT')
+        avg_box.prop(settings, "average_mix_factor")
+        avg_box.operator(MESH_OT_average_island_weights.bl_idname)
+
+        # --- Copying Box ---
+        copy_box = layout.box()
+        copy_box.label(text="Copy Closest Weights", icon='COPYDOWN')
+        copy_box.prop(settings, "source_object")
+        copy_box.prop(settings, "copy_mix_factor")
+        
+        col = copy_box.column()
+        # Disable the copy button if no source object is selected for better UX
+        col.enabled = settings.source_object is not None
+        col.operator(MESH_OT_copy_closest_weights.bl_idname)
+
+
+# --- Registration ---
+classes = (
+    WeightToolsSettings,
+    MESH_OT_average_island_weights,
+    MESH_OT_copy_closest_weights,
+    VIEW3D_PT_weight_tools,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    # Add the property group to the scene type
+    bpy.types.Scene.weight_tools_settings = PointerProperty(type=WeightToolsSettings)
+
+def unregister():
+    # Delete the property group from the scene type
+    del bpy.types.Scene.weight_tools_settings
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+if __name__ == "__main__":
+    register()

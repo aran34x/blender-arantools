@@ -1,0 +1,411 @@
+bl_info = {
+    "name": "Feather Rigger (Final + Multi-Filter)",
+    "author": "Gemini",
+    "version": (7, 0),
+    "blender": (3, 4, 0),
+    "location": "View3D > Sidebar > Rigging",
+    "description": "Auto-rigs feathers with comma-separated bone filtering (Include/Exclude).",
+    "category": "Rigging",
+}
+
+import bpy
+import mathutils
+
+# ------------------------------------------------------------------------
+#    MATH HELPERS (DISTANCE SOLVERS)
+# ------------------------------------------------------------------------
+
+def get_closest_vertex_dist(mesh_obj, target_point):
+    """
+    Calculates the distance from a target point (Bone Tip) to the nearest vertex on the mesh.
+    Used to determine which feather belongs to which bone chain.
+    """
+    mw = mesh_obj.matrix_world
+    # Transform target to local space (Optimization: avoids transforming all vertices)
+    target_local = mw.inverted() @ target_point
+    
+    min_sq = float('inf')
+    for v in mesh_obj.data.vertices:
+        dist_sq = (v.co - target_local).length_squared
+        if dist_sq < min_sq:
+            min_sq = dist_sq
+            
+    return min_sq ** 0.5
+
+def get_segment_distance(pt, v1, v2):
+    """
+    Calculates the distance from a point (pt) to a line segment (v1-v2).
+    Used for weighting: Vertices closer to the bone segment get higher weight.
+    """
+    line_vec = v2 - v1
+    pnt_vec = pt - v1
+    line_len = line_vec.length
+    
+    # Avoid division by zero if bone length is 0
+    if line_len < 0.0001: 
+        return (pt - v1).length
+    
+    line_unitvec = line_vec.normalized()
+    pnt_vec_scaled = pnt_vec * (1.0 / line_len)
+    t = line_unitvec.dot(pnt_vec_scaled)
+    
+    # Clamp to segment endpoints
+    if t < 0.0: nearest = v1
+    elif t > 1.0: nearest = v2
+    else: nearest = line_vec * t + v1
+        
+    return (pt - nearest).length
+
+def solve_linear_weights(mesh_obj, armature_obj, bone_names):
+    """
+    Mathematically assigns weights using Inverse Square Falloff.
+    This ensures smooth gradients even on low-poly feathers where 'Automatic Weights' fails.
+    """
+    # 1. Ensure Vertex Groups exist
+    groups = []
+    for name in bone_names:
+        vg = mesh_obj.vertex_groups.get(name)
+        if not vg: vg = mesh_obj.vertex_groups.new(name=name)
+        groups.append((name, vg))
+    
+    # 2. Get Bone Segment Coordinates (World Space)
+    segments = []
+    mw_arm = armature_obj.matrix_world
+    for name in bone_names:
+        b = armature_obj.data.bones.get(name)
+        if b:
+            segments.append((mw_arm @ b.head_local, mw_arm @ b.tail_local))
+            
+    # 3. Calculate Weights for every vertex
+    mw_mesh = mesh_obj.matrix_world
+    for v in mesh_obj.data.vertices:
+        v_world = mw_mesh @ v.co
+        
+        weights = []
+        total_w = 0.0
+        
+        for (head, tail) in segments:
+            d = get_segment_distance(v_world, head, tail)
+            # Formula: Weight = 1 / (Distance^2 + Epsilon)
+            w = 1.0 / ((d * d) + 0.00001)
+            weights.append(w)
+            total_w += w
+            
+        # 4. Normalize (0.0 to 1.0) and Assign
+        if total_w > 0:
+            for i, w in enumerate(weights):
+                norm = w / total_w
+                # Cleanup: Don't assign negligible weights (< 0.5%)
+                if norm > 0.005:
+                    groups[i][1].add([v.index], norm, 'REPLACE')
+
+# ------------------------------------------------------------------------
+#    FILTERING LOGIC (THE REQUESTED FEATURE)
+# ------------------------------------------------------------------------
+
+def filter_bones(armature, props):
+    """
+    Filters the armature's bones based on user settings:
+    1. Deform Only (Always)
+    2. Selected Only (Optional)
+    3. Included Strings (Optional)
+    4. Excluded Strings (Optional)
+    """
+    all_bones = armature.data.bones
+    
+    # --- LEVEL 1: DEFORM CHECK ---
+    # We never want to rig to control bones or mechanism bones
+    valid_bones = [b for b in all_bones if b.use_deform]
+    
+    # --- LEVEL 2: SELECTION CHECK ---
+    if props.use_selected_only:
+        selected_names = set()
+        if armature.mode == 'EDIT':
+            selected_names = {b.name for b in armature.data.edit_bones if b.select}
+        else:
+            # Works in Object and Pose mode
+            selected_names = {b.name for b in armature.data.bones if b.select}
+            
+        valid_bones = [b for b in valid_bones if b.name in selected_names]
+        
+    # --- LEVEL 3: STRING INCLUSION (OR Logic) ---
+    # Example: "wing, feather" -> matches "Wing_L", "Feather_01", "Wing_Tip"
+    if props.filter_include.strip():
+        # Split by comma, strip spaces, convert to lowercase
+        keywords = [k.strip().lower() for k in props.filter_include.split(',') if k.strip()]
+        
+        if keywords:
+            # Keep bone if ANY keyword is inside its name
+            valid_bones = [b for b in valid_bones if any(k in b.name.lower() for k in keywords)]
+        
+    # --- LEVEL 4: STRING EXCLUSION (OR Logic) ---
+    # Example: "twist, adj, mech" -> removes "Wing_Twist_L", "Leg_Adj"
+    if props.filter_exclude.strip():
+        keywords = [k.strip().lower() for k in props.filter_exclude.split(',') if k.strip()]
+        
+        if keywords:
+            # Keep bone only if NO keywords are found in its name
+            valid_bones = [b for b in valid_bones if not any(k in b.name.lower() for k in keywords)]
+        
+    return valid_bones
+
+def get_filtered_chains(armature, props):
+    """
+    Reconstructs chains using ONLY the filtered bones.
+    """
+    valid_bones = filter_bones(armature, props)
+    valid_names = {b.name for b in valid_bones}
+    
+    # Find leaves within the filtered subset
+    # A filtered leaf is a bone that has no children present in the 'valid_names' set
+    leaves = []
+    for b in valid_bones:
+        valid_children = [c for c in b.children if c.name in valid_names]
+        if not valid_children:
+            leaves.append(b)
+            
+    chains = []
+    
+    for leaf in leaves:
+        chain = []
+        curr = leaf
+        
+        # Walk up the hierarchy 'chain_length' times
+        for _ in range(props.chain_length):
+            chain.append(curr)
+            parent = curr.parent
+            # Stop if we hit a bone that was filtered out (e.g., a non-deform parent)
+            if parent and parent.name in valid_names:
+                curr = parent
+            else:
+                break
+        
+        if not chain: continue
+        
+        # Determine Tip Location for the Global Solver
+        tip_bone = chain[0] 
+        tip_loc = armature.matrix_world @ tip_bone.tail_local
+        
+        chains.append({
+            'bones': [b.name for b in chain],
+            'tip_loc': tip_loc,
+            'leaf_name': tip_bone.name,
+            'id': len(chains)
+        })
+        
+    return chains
+
+# ------------------------------------------------------------------------
+#    MAIN EXECUTION LOOP
+# ------------------------------------------------------------------------
+
+def main_process(self, context, props):
+    armature = props.target_armature
+    active_obj = context.active_object
+    
+    # Validation
+    if not armature or active_obj.type != 'MESH':
+        self.report({'ERROR'}, "Select a Mesh and assign an Armature first.")
+        return {'CANCELLED'}
+    
+    original_name = active_obj.name
+    
+    # 1. Clean Slate (Remove existing parents to prevent loops)
+    bpy.ops.object.parent_clear(type='CLEAR')
+    
+    # 2. Separate Mesh into Islands (Feathers)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.mesh.separate(type='LOOSE')
+    
+    meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+    
+    # 3. Get Chains (Applying all filters)
+    chains = get_filtered_chains(armature, props)
+    
+    if not chains:
+        self.report({'ERROR'}, "No bones found! Check your Filters.")
+        # Rejoin and exit
+        context.view_layer.objects.active = meshes[0]
+        bpy.ops.object.join()
+        return {'CANCELLED'}
+
+    self.report({'INFO'}, f"Rigging {len(meshes)} feathers to {len(chains)} chains...")
+
+    # 4. Global Solver: Calculate Distance from Every Feather to Every Bone Tip
+    candidates = [] 
+    
+    for m_idx, mesh in enumerate(meshes):
+        for c_idx, chain in enumerate(chains):
+            # Key Metric: Tip-to-Tip Proximity
+            dist = get_closest_vertex_dist(mesh, chain['tip_loc'])
+            candidates.append((dist, m_idx, c_idx))
+            
+    # Sort: Smallest distance first (Best fits get priority)
+    candidates.sort(key=lambda x: x[0])
+    
+    assigned_meshes = set()
+    assigned_chains = set()
+    assignments = {} 
+    
+    for dist, m_idx, c_idx in candidates:
+        # If this feather is already taken, skip
+        if m_idx in assigned_meshes: continue
+        
+        # If "Exclusive" is on, check if chain is already taken
+        if props.exclusive_chains and c_idx in assigned_chains: continue
+        
+        assigned_meshes.add(m_idx)
+        assigned_chains.add(c_idx)
+        assignments[meshes[m_idx]] = chains[c_idx]
+
+    # 5. Apply Rigging
+    try:
+        count = 0
+        for mesh, chain in assignments.items():
+            context.view_layer.objects.active = mesh
+            
+            # Apply Mathematical Weights
+            solve_linear_weights(mesh, armature, chain['bones'])
+            
+            # Parent to Armature
+            bpy.ops.object.select_all(action='DESELECT')
+            mesh.select_set(True)
+            armature.select_set(True)
+            context.view_layer.objects.active = armature
+            bpy.ops.object.parent_set(type='ARMATURE', keep_transform=True)
+            
+            count += 1
+            
+    finally:
+        # 6. Rejoin Everything
+        if bpy.context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+        bpy.ops.object.select_all(action='DESELECT')
+        valid_meshes = [m for m in meshes if m]
+        
+        if valid_meshes:
+            for m in valid_meshes: m.select_set(True)
+            
+            context.view_layer.objects.active = valid_meshes[0]
+            bpy.ops.object.join()
+            
+            final_obj = context.active_object
+            final_obj.name = original_name
+            
+            # Final Safety Parent
+            bpy.ops.object.select_all(action='DESELECT')
+            final_obj.select_set(True)
+            armature.select_set(True)
+            context.view_layer.objects.active = armature
+            bpy.ops.object.parent_set(type='ARMATURE', keep_transform=True)
+            
+            # Status Report
+            msg = f"Rigged {count} feathers."
+            skipped = len(meshes) - count
+            if skipped > 0:
+                msg += f" (Skipped {skipped} - Check filters or proximity)"
+                self.report({'WARNING'}, msg)
+            else:
+                self.report({'INFO'}, msg)
+
+    return {'FINISHED'}
+
+# ------------------------------------------------------------------------
+#    UI & PROPERTIES
+# ------------------------------------------------------------------------
+
+class FeatherRigProperties(bpy.types.PropertyGroup):
+    target_armature: bpy.props.PointerProperty(
+        type=bpy.types.Object, 
+        poll=lambda s,o: o.type=='ARMATURE', 
+        name="Armature"
+    )
+    
+    chain_length: bpy.props.IntProperty(
+        name="Chain Length", 
+        default=2, 
+        min=1,
+        description="How many bones per feather? (1 = Tip bone only, 2 = Tip + Parent)"
+    )
+    
+    exclusive_chains: bpy.props.BoolProperty(
+        name="Exclusive (1 Bone = 1 Mesh)", 
+        default=True,
+        description="If ON: A bone chain can only own ONE feather (Best for detailed wings).\nIf OFF: A bone can own multiple feathers (Best for fans/tails)."
+    )
+    
+    # --- FILTERS ---
+    use_selected_only: bpy.props.BoolProperty(
+        name="Only Selected Bones", 
+        default=False, 
+        description="Ignore all bones except the ones currently selected in Pose/Edit Mode."
+    )
+    
+    filter_include: bpy.props.StringProperty(
+        name="Include", 
+        description="Only use bones containing these words.\nComma separated (e.g. 'wing, feather').\nLeave empty to use all."
+    )
+    
+    filter_exclude: bpy.props.StringProperty(
+        name="Exclude", 
+        description="Ignore bones containing these words.\nComma separated (e.g. 'forearm, twist, mech').\nRuns AFTER inclusion."
+    )
+
+class OBJECT_OT_auto_feather_rig(bpy.types.Operator):
+    bl_idname = "object.auto_feather_rig"
+    bl_label = "Rig Feathers"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return main_process(self, context, context.scene.feather_rig_props_v7)
+
+class VIEW3D_PT_feather_rig(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Rigging"
+    bl_label = "Auto Feather Rigger"
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.feather_rig_props_v7
+        
+        layout.prop(props, "target_armature")
+        
+        # Solver Box
+        box = layout.box()
+        box.label(text="Solver Settings", icon='CONSTRAINT_BONE')
+        box.prop(props, "chain_length")
+        box.prop(props, "exclusive_chains")
+        
+        # Filter Box
+        box = layout.box()
+        box.label(text="Bone Filters", icon='FILTER')
+        box.prop(props, "use_selected_only")
+        
+        col = box.column(align=True)
+        col.prop(props, "filter_include", text="Include Only")
+        col.prop(props, "filter_exclude", text="Exclude")
+        
+        # Tips / Help
+        if props.filter_exclude:
+            row = box.row()
+            row.label(text=f"Excluding: {props.filter_exclude}", icon='INFO')
+            
+        layout.separator()
+        layout.operator("object.auto_feather_rig", icon='MOD_ARMATURE')
+
+def register():
+    bpy.utils.register_class(FeatherRigProperties)
+    bpy.utils.register_class(OBJECT_OT_auto_feather_rig)
+    bpy.utils.register_class(VIEW3D_PT_feather_rig)
+    bpy.types.Scene.feather_rig_props_v7 = bpy.props.PointerProperty(type=FeatherRigProperties)
+
+def unregister():
+    bpy.utils.unregister_class(FeatherRigProperties)
+    bpy.utils.unregister_class(OBJECT_OT_auto_feather_rig)
+    bpy.utils.unregister_class(VIEW3D_PT_feather_rig)
+    del bpy.types.Scene.feather_rig_props_v7
+
+if __name__ == "__main__":
+    register()

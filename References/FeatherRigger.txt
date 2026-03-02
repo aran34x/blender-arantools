@@ -1,0 +1,233 @@
+#-----------------------------------------------------------------------------------------
+# SCRIPT:         Mesh Island Weight Tools
+# VERSION:        2.1 (Renamed)
+# AUTHOR:         Gemini
+# DESCRIPTION:    A tool to weight mesh parts (islands). It uses sharp edges as
+#                 'pointers' to find the nearest selected bone and then weights the
+#                 associated mesh island to that bone's chain.
+#
+#                 !!! IMPORTANT !!!
+#                 This script requires the "Auto-Rig Pro" addon to be
+#                 installed and enabled to perform the final weighting step.
+#-----------------------------------------------------------------------------------------
+
+bl_info = {
+    "name": "Mesh Island Weight Tools",
+    "author": "Gemini",
+    "version": (2, 1, 0),
+    "blender": (2, 83, 0),
+    "location": "View3D > UI > Island Tools",
+    "description": "Uses sharp edges as 'pointers' to weight mesh islands to the nearest bone chain.",
+    "warning": "Requires the 'Auto-Rig Pro' addon for the binding operation.",
+    "category": "Object",
+}
+
+import bpy
+from collections import defaultdict
+
+# --- Main Operator: Does all the work ---
+class ISLANDWEIGHT_OT_Execute(bpy.types.Operator):
+    """Operator to weight mesh islands based on sharp edge pointers"""
+    bl_idname = "object.mesh_island_weight"
+    bl_label = "Weight from Sharp Edges"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    # Property to control the bone chain length, taken from the UI
+    chain_length: bpy.props.IntProperty(name="Chain Length")
+
+    def execute(self, context):
+        # 1. --- INITIAL SETUP AND VALIDATION ---
+        mesh_obj = None
+        armature_obj = None
+
+        for obj in context.selected_objects:
+            if obj.type == 'MESH':
+                mesh_obj = obj
+            elif obj.type == 'ARMATURE':
+                armature_obj = obj
+        
+        if not mesh_obj or not armature_obj:
+            self.report({'ERROR'}, "Select one Mesh and one Armature.")
+            return {'CANCELLED'}
+        
+        if context.active_object and context.active_object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        mesh_data = mesh_obj.data
+        armature_data = armature_obj.data
+        
+        context.view_layer.objects.active = armature_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        selected_bone_names = {bone.name for bone in context.selected_bones}
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        if not selected_bone_names:
+            self.report({"ERROR"}, "No bones selected in Armature Edit Mode. Select control bones first.")
+            return {'CANCELLED'}
+
+        # 2. --- PRE-COMPUTATION FOR SPEED ---
+        sharp_edge_indices = {e.index for e in mesh_data.edges if e.use_edge_sharp}
+        if not sharp_edge_indices:
+            self.report({'WARNING'}, "The mesh has no sharp edges to use as pointers.")
+            return {'CANCELLED'}
+
+        adjacency_list = defaultdict(list)
+        for edge in mesh_data.edges:
+            if edge.index not in sharp_edge_indices:
+                v1, v2 = edge.vertices
+                adjacency_list[v1].append(v2)
+                adjacency_list[v2].append(v1)
+
+        # 3. --- MAIN PROCESSING LOOP ---
+        if mesh_obj.vertex_groups:
+            context.view_layer.objects.active = mesh_obj
+            bpy.ops.object.vertex_group_remove(all=True)
+
+        for bone_name in selected_bone_names:
+            mesh_obj.vertex_groups.new(name=bone_name)
+
+        processed_verts = set()
+        islands_processed = 0
+
+        for edge_index in sharp_edge_indices:
+            sharp_edge = mesh_data.edges[edge_index]
+            start_vertex_idx = sharp_edge.vertices[0]
+
+            if start_vertex_idx in processed_verts:
+                continue
+
+            v1 = mesh_data.vertices[sharp_edge.vertices[0]]
+            v2 = mesh_data.vertices[sharp_edge.vertices[1]]
+            local_edge_center = (v1.co + v2.co) / 2.0
+            world_edge_center = mesh_obj.matrix_world @ local_edge_center
+
+            closest_bone_name = None
+            min_dist = float('inf')
+
+            for bone_name in selected_bone_names:
+                pose_bone = armature_obj.pose.bones.get(bone_name)
+                if pose_bone:
+                    bone_center = (pose_bone.head + pose_bone.tail) / 2.0
+                    dist = (bone_center - world_edge_center).length
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_bone_name = bone_name
+            
+            if not closest_bone_name:
+                continue
+
+            part_vertices = []
+            queue = [start_vertex_idx]
+            visited_in_part = {start_vertex_idx}
+
+            while queue:
+                current_v_idx = queue.pop(0)
+                part_vertices.append(current_v_idx)
+                for neighbor_idx in adjacency_list[current_v_idx]:
+                    if neighbor_idx not in visited_in_part:
+                        visited_in_part.add(neighbor_idx)
+                        queue.append(neighbor_idx)
+            
+            processed_verts.update(part_vertices)
+            
+            context.view_layer.objects.active = armature_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.armature.select_all(action='DESELECT')
+            armature_data.edit_bones.active = armature_data.edit_bones[closest_bone_name]
+            bpy.ops.armature.select_hierarchy(direction='CHILD', extend=False)
+            bpy.ops.armature.select_hierarchy(direction='PARENT', extend=True)
+
+            for _ in range(self.chain_length):
+                bpy.ops.armature.select_hierarchy(direction='PARENT', extend=True)
+            
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+            context.view_layer.objects.active = mesh_obj
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.select_all(action='DESELECT')
+            bpy.ops.object.mode_set(mode='OBJECT')
+            for v_idx in part_vertices:
+                mesh_data.vertices[v_idx].select = True
+            
+            mesh_obj.select_set(True)
+            armature_obj.select_set(True)
+            context.view_layer.objects.active = armature_obj
+
+            try:
+                bpy.ops.arp.bind_to_rig()
+            except AttributeError:
+                self.report({'ERROR'}, "'Auto-Rig Pro' is not enabled or installed. Cannot bind.")
+                bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.select_all(action='DESELECT')
+                return {'CANCELLED'}
+            
+            islands_processed += 1
+
+        # 4. --- FINAL CLEANUP ---
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        mesh_obj.select_set(True)
+        armature_obj.select_set(True)
+        context.view_layer.objects.active = mesh_obj
+
+        self.report({'INFO'}, f"Weighting complete. Processed {islands_processed} islands.")
+        return {'FINISHED'}
+
+# --- UI Panel: The menu you see in Blender ---
+class ISLANDWEIGHT_PT_Panel(bpy.types.Panel):
+    bl_label = "Mesh Island Weight"
+    bl_idname = "OBJECT_PT_mesh_island_weight"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Island Tools'
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.island_weight_props
+
+        box = layout.box()
+        box.label(text="How to Use:", icon='INFO')
+        col = box.column(align=True)
+        col.label(text="1. Select Mesh, then Armature.")
+        col.label(text="2. In Armature Edit Mode, select bones.")
+        col.label(text="3. On Mesh, mark Sharp Edges to act as")
+        col.label(text="   'pointers' to find the nearest bone.")
+        
+        layout.separator()
+        layout.prop(props, "chain_length")
+        layout.separator()
+
+        op = layout.operator(ISLANDWEIGHT_OT_Execute.bl_idname, icon='MOD_VERTEX_WEIGHT')
+        op.chain_length = props.chain_length
+
+        warning_box = layout.box()
+        warning_box.label(text="Requires 'Auto-Rig Pro'", icon='ERROR')
+
+# --- Properties: To store settings in the scene ---
+class IslandWeightProperties(bpy.types.PropertyGroup):
+    chain_length: bpy.props.IntProperty(
+        name="Chain Length",
+        description="Number of parent bones to include in the weighting chain",
+        default=2,
+        min=0
+    )
+
+# --- Registration ---
+classes = (
+    IslandWeightProperties,
+    ISLANDWEIGHT_OT_Execute,
+    ISLANDWEIGHT_PT_Panel,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.island_weight_props = bpy.props.PointerProperty(type=IslandWeightProperties)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.island_weight_props
+
+if __name__ == "__main__":
+    register()
