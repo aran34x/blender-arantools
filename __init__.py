@@ -25,7 +25,7 @@ _PANEL_CATEGORY = 'Aran Tools'
 
 
 # ============================================================================
-# Root panel
+# Main panel — single panel with icon tab switcher
 # ============================================================================
 
 class ARANTOOLS_PT_main(Panel):
@@ -36,27 +36,33 @@ class ARANTOOLS_PT_main(Panel):
     bl_category = _PANEL_CATEGORY
 
     def draw(self, context):
-        pass
-
-
-# ============================================================================
-# Rigging sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_rigging(Panel):
-    bl_label = "Rigging"
-    bl_idname = "ARANTOOLS_PT_rigging"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_01_VEC')  # red
-
-    def draw(self, context):
         layout = self.layout
+        scene = context.scene
+
+        # Icon-only tab bar
+        row = layout.row(align=True)
+        row.scale_y = 1.3
+        row.prop(scene, 'arantools_active_tab', expand=True)
+
+        layout.separator(factor=0.5)
+
+        tab = scene.arantools_active_tab
+        if tab == 'RIGGING':
+            self._draw_rigging(layout, context)
+        elif tab == 'WEIGHT':
+            self._draw_weight_tools(layout, context)
+        elif tab == 'ORGANIZATION':
+            self._draw_organization(layout, context)
+        elif tab == 'EXPORT':
+            self._draw_export(layout, context)
+        elif tab == 'NAMING':
+            self._draw_naming(layout, context)
+        elif tab == 'ANIMATION':
+            self._draw_animation(layout, context)
+
+    # ── Rigging ──────────────────────────────────────────────────────────────
+
+    def _draw_rigging(self, layout, context):
         props = context.scene.arantools_adv_rigging
 
         box = layout.box()
@@ -116,26 +122,9 @@ class ARANTOOLS_PT_rigging(Panel):
         col.operator("arantools.direct_arp_bind", icon='LINKED')
         col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
+    # ── Weight Tools ─────────────────────────────────────────────────────────
 
-# ============================================================================
-# Weight Tools sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_weight_tools(Panel):
-    bl_label = "Weight Tools"
-    bl_idname = "ARANTOOLS_PT_weight_tools"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_03_VEC')  # orange
-
-    def draw(self, context):
-        layout = self.layout
-
+    def _draw_weight_tools(self, layout, context):
         box = layout.box()
         box.label(text="Smart Weight Transfer", icon='MOD_DATA_TRANSFER')
         props = context.scene.arantools_smart_transfer
@@ -185,26 +174,9 @@ class ARANTOOLS_PT_weight_tools(Panel):
             row.prop(props, "uv_direction", expand=True)
         col.operator("arantools.contact_flood", icon='DRIVER_DISTANCE')
 
+    # ── Organization ─────────────────────────────────────────────────────────
 
-# ============================================================================
-# Organization sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_organization(Panel):
-    bl_label = "Organization"
-    bl_idname = "ARANTOOLS_PT_organization"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_09_VEC')  # blue
-
-    def draw(self, context):
-        layout = self.layout
-
+    def _draw_organization(self, layout, context):
         box = layout.box()
         box.label(text="Batch Rig Transfer", icon='ARMATURE_DATA')
         props = context.scene.arantools_rt_props
@@ -253,25 +225,9 @@ class ARANTOOLS_PT_organization(Panel):
         else:
             box.label(text="Select a Source Collection.", icon='INFO')
 
+    # ── Export ───────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Export sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_export(Panel):
-    bl_label = "Export"
-    bl_idname = "ARANTOOLS_PT_export"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_05_VEC')  # yellow
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_export(self, layout, context):
         props = context.scene.arantools_arp_export
 
         box = layout.box()
@@ -312,25 +268,9 @@ class ARANTOOLS_PT_export(Panel):
         row.operator("arantools.arp_batch_export", icon='EXPORT')
         box.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
+    # ── Naming ───────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Naming sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_naming(Panel):
-    bl_label = "Naming"
-    bl_idname = "ARANTOOLS_PT_naming"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_07_VEC')  # teal
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_naming(self, layout, context):
         scene = context.scene
 
         box = layout.box()
@@ -371,25 +311,9 @@ class ARANTOOLS_PT_naming(Panel):
         row.operator("arantools.rename_bone", text='Rename  (Alt+Shift+R)', icon='GREASEPENCIL')
         col.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
 
+    # ── Animation ────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Animation sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_animation(Panel):
-    bl_label = "Animation"
-    bl_idname = "ARANTOOLS_PT_animation"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='COLORSET_11_VEC')  # purple
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_animation(self, layout, context):
         scene = context.scene
 
         box = layout.box()
@@ -414,12 +338,6 @@ class ARANTOOLS_PT_animation(Panel):
 
 classes = [
     ARANTOOLS_PT_main,
-    ARANTOOLS_PT_rigging,
-    ARANTOOLS_PT_weight_tools,
-    ARANTOOLS_PT_organization,
-    ARANTOOLS_PT_export,
-    ARANTOOLS_PT_naming,
-    ARANTOOLS_PT_animation,
 ]
 
 
@@ -430,11 +348,26 @@ def register():
     weight_tools.register()
     organization.register()
     export.register()
+
+    # Tab switcher — empty names so expand=True shows icons only
+    bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
+        items=[
+            ('RIGGING',       "", "Rigging",       'ARMATURE_DATA',      0),
+            ('WEIGHT',        "", "Weight Tools",   'MOD_VERTEX_WEIGHT',  1),
+            ('ORGANIZATION',  "", "Organization",   'OUTLINER',           2),
+            ('EXPORT',        "", "Export",         'EXPORT',             3),
+            ('NAMING',        "", "Naming",         'SORTALPHA',          4),
+            ('ANIMATION',     "", "Animation",      'ANIM',               5),
+        ],
+        default='RIGGING',
+    )
+
     for cls in classes:
         bpy.utils.register_class(cls)
 
 
 def unregister():
+    del bpy.types.Scene.arantools_active_tab
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     export.unregister()
