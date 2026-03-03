@@ -56,6 +56,9 @@ class ARANTOOLS_PT_rigging(Panel):
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_01')
+
     def draw(self, context):
         layout = self.layout
         props = context.scene.arantools_adv_rigging
@@ -142,6 +145,9 @@ class ARANTOOLS_PT_weight_tools(Panel):
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_04')
+
     def draw(self, context):
         layout = self.layout
 
@@ -213,6 +219,9 @@ class ARANTOOLS_PT_organization(Panel):
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_06')
+
     def draw(self, context):
         layout = self.layout
 
@@ -282,6 +291,9 @@ class ARANTOOLS_PT_export(Panel):
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_03')
+
     def draw(self, context):
         layout = self.layout
         props = context.scene.arantools_arp_export
@@ -340,6 +352,9 @@ class ARANTOOLS_PT_naming(Panel):
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_05')
+
     def draw(self, context):
         layout = self.layout
         scene = context.scene
@@ -396,6 +411,9 @@ class ARANTOOLS_PT_animation(Panel):
     bl_category = _PANEL_CATEGORY
     bl_parent_id = "ARANTOOLS_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        self.layout.label(text="", icon='SEQUENCE_COLOR_08')
 
     def draw(self, context):
         layout = self.layout
