@@ -19,17 +19,78 @@ from . import organization
 from . import export
 
 
-# ============================================================================
-# Panel helpers
-# ============================================================================
-
 _PANEL_SPACE = 'VIEW_3D'
 _PANEL_REGION = 'UI'
 _PANEL_CATEGORY = 'Aran Tools'
 
+# Colored ball icons (COLORSET_*_VEC) — available since Blender 2.8
+_SECTION_COLORS = {
+    'rigging':      'COLORSET_03_VEC',  # orange-red
+    'weight_tools': 'COLORSET_06_VEC',  # green
+    'organization': 'COLORSET_09_VEC',  # blue
+    'export_panel': 'COLORSET_05_VEC',  # yellow
+    'naming':       'COLORSET_07_VEC',  # teal
+    'animation':    'COLORSET_11_VEC',  # purple
+}
+
 
 # ============================================================================
-# Root panel (just provides the tab)
+# Panel state
+# ============================================================================
+
+class ARANTOOLS_PG_PanelState(bpy.types.PropertyGroup):
+    rigging:      bpy.props.BoolProperty(default=False)
+    weight_tools: bpy.props.BoolProperty(default=False)
+    organization: bpy.props.BoolProperty(default=False)
+    export_panel: bpy.props.BoolProperty(default=False)
+    naming:       bpy.props.BoolProperty(default=False)
+    animation:    bpy.props.BoolProperty(default=False)
+
+
+class ARANTOOLS_OT_ToggleSection(bpy.types.Operator):
+    bl_idname = "arantools.toggle_section"
+    bl_label = ""
+    bl_description = "Toggle section"
+    bl_options = {'INTERNAL', 'REGISTER'}
+
+    prop: bpy.props.StringProperty()
+
+    def execute(self, context):
+        state = context.scene.arantools_panel_state
+        setattr(state, self.prop, not getattr(state, self.prop))
+        return {'FINISHED'}
+
+
+def _section(layout, state, key, label, icon):
+    """Draw a ZenUV-style section header. Returns True when the section is open."""
+    expanded = getattr(state, key)
+    color_icon = _SECTION_COLORS.get(key, 'BLANK1')
+    arrow = 'TRIA_DOWN' if expanded else 'TRIA_RIGHT'
+
+    row = layout.row(align=True)
+    row.scale_y = 1.2
+
+    # Small colored dot button (icon-only)
+    op = row.operator(
+        "arantools.toggle_section",
+        text="", icon=color_icon,
+        emboss=True, depress=expanded,
+    )
+    op.prop = key
+
+    # Wide label button
+    op2 = row.operator(
+        "arantools.toggle_section",
+        text=label, icon=arrow,
+        emboss=True, depress=expanded,
+    )
+    op2.prop = key
+
+    return expanded
+
+
+# ============================================================================
+# Main panel
 # ============================================================================
 
 class ARANTOOLS_PT_main(Panel):
@@ -40,212 +101,168 @@ class ARANTOOLS_PT_main(Panel):
     bl_category = _PANEL_CATEGORY
 
     def draw(self, context):
-        pass
-
-
-# ============================================================================
-# Rigging sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_rigging(Panel):
-    bl_label = "Rigging"
-    bl_idname = "ARANTOOLS_PT_rigging"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_01')
-
-    def draw(self, context):
         layout = self.layout
-        props = context.scene.arantools_adv_rigging
+        state = context.scene.arantools_panel_state
 
-        # --- Selection ---
-        box = layout.box()
+        if _section(layout, state, 'rigging', "Rigging", 'ARMATURE_DATA'):
+            self._draw_rigging(layout, context)
+
+        if _section(layout, state, 'weight_tools', "Weight Tools", 'MOD_VERTEX_WEIGHT'):
+            self._draw_weight_tools(layout, context)
+
+        if _section(layout, state, 'organization', "Organization", 'OUTLINER'):
+            self._draw_organization(layout, context)
+
+        if _section(layout, state, 'export_panel', "Export", 'EXPORT'):
+            self._draw_export(layout, context)
+
+        if _section(layout, state, 'naming', "Naming", 'SORTALPHA'):
+            self._draw_naming(layout, context)
+
+        if _section(layout, state, 'animation', "Animation", 'ANIM'):
+            self._draw_animation(layout, context)
+
+    # ── Rigging ──────────────────────────────────────────────────────────────
+
+    def _draw_rigging(self, layout, context):
+        props = context.scene.arantools_adv_rigging
+        col = layout.column(align=False)
+
+        box = col.box()
         box.label(text="Selection", icon='FILTER')
         box.operator("arantools.select_deform_bones", icon='BONE_DATA')
         row = box.row(align=True)
         row.operator("arantools.select_bone_type", text="Control Bones").bone_type = 'CONTROL'
         row.operator("arantools.select_bone_type", text="Mech Bones").bone_type = 'MECH'
 
-        # --- Mirror ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Mirror", icon='MOD_MIRROR')
         box.operator("arantools.mirror_bones", icon='MOD_MIRROR')
 
-        # --- Feather Rigger ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Feather Rigger", icon='OUTLINER_OB_CURVES')
         fr = context.scene.arantools_feather_rig
-        col = box.column(align=True)
-        col.prop(fr, "target_armature")
-        col.separator()
-
-        col.label(text="Matching:", icon='CON_TRACKTO')
-        col.prop(fr, "pointer_method", text="Island Pointer")
-        col.prop(fr, "bone_target", text="Measure to")
-        col.separator()
-
-        col.label(text="Weighting:", icon='MOD_VERTEX_WEIGHT')
-        col.prop(fr, "weight_method", text="Method")
-        col.prop(fr, "chain_length")
-        col.prop(fr, "exclusive_chains")
-        col.separator()
-
-        col.label(text="Bone Filters:", icon='FILTER')
-        col.prop(fr, "use_selected_only")
-        row = col.row(align=True)
-        row.prop(fr, "filter_include", text="Include")
-        row = col.row(align=True)
-        row.prop(fr, "filter_exclude", text="Exclude")
-        col.separator()
-
-        run_row = col.row()
+        c = box.column(align=True)
+        c.prop(fr, "target_armature")
+        c.separator()
+        c.label(text="Matching:", icon='CON_TRACKTO')
+        c.prop(fr, "pointer_method", text="Island Pointer")
+        c.prop(fr, "bone_target", text="Measure to")
+        c.separator()
+        c.label(text="Weighting:", icon='MOD_VERTEX_WEIGHT')
+        c.prop(fr, "weight_method", text="Method")
+        c.prop(fr, "chain_length")
+        c.prop(fr, "exclusive_chains")
+        c.separator()
+        c.label(text="Bone Filters:", icon='FILTER')
+        c.prop(fr, "use_selected_only")
+        c.prop(fr, "filter_include", text="Include")
+        c.prop(fr, "filter_exclude", text="Exclude")
+        c.separator()
+        run_row = c.row()
         run_row.enabled = fr.target_armature is not None
         run_row.scale_y = 1.4
         run_row.operator("arantools.rig_feathers", icon='AUTO')
         if fr.weight_method == 'ARP':
-            col.label(text="Requires Auto-Rig Pro", icon='ERROR')
+            c.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
-        # --- Join & Bind (Advanced) ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Join & Bind", icon='MOD_DATA_TRANSFER')
-        col = box.column(align=True)
-        col.prop(props, "target_collection")
-        col.operator("arantools.join_targets", icon='OBJECT_DATAMODE')
-        col.separator()
-        col.prop(props, "source_mesh")
-        col.prop(props, "mapping_method", text="")
-        col.operator("arantools.bind_and_transfer", icon='ARMATURE_DATA')
+        c = box.column(align=True)
+        c.prop(props, "target_collection")
+        c.operator("arantools.join_targets", icon='OBJECT_DATAMODE')
+        c.separator()
+        c.prop(props, "source_mesh")
+        c.prop(props, "mapping_method", text="")
+        c.operator("arantools.bind_and_transfer", icon='ARMATURE_DATA')
 
-        # --- ARP Weight from Pointer ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Weight from Pointer  (ARP)", icon='BONE_DATA')
-        col = box.column(align=True)
-        col.prop(props, "sharp_edge_pointer_method", text="Pointer By")
-        col.prop(props, "chain_length")
-        col.operator("arantools.weight_from_pointer", icon='CURVE_PATH')
-        col.operator("arantools.direct_arp_bind", icon='LINKED')
-        col.label(text="Requires Auto-Rig Pro", icon='ERROR')
+        c = box.column(align=True)
+        c.prop(props, "sharp_edge_pointer_method", text="Pointer By")
+        c.prop(props, "chain_length")
+        c.operator("arantools.weight_from_pointer", icon='CURVE_PATH')
+        c.operator("arantools.direct_arp_bind", icon='LINKED')
+        c.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
+    # ── Weight Tools ─────────────────────────────────────────────────────────
 
-# ============================================================================
-# Weight Tools sub-panel
-# ============================================================================
+    def _draw_weight_tools(self, layout, context):
+        col = layout.column(align=False)
 
-class ARANTOOLS_PT_weight_tools(Panel):
-    bl_label = "Weight Tools"
-    bl_idname = "ARANTOOLS_PT_weight_tools"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_04')
-
-    def draw(self, context):
-        layout = self.layout
-
-        # --- Smart Weight Transfer ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Smart Weight Transfer", icon='MOD_DATA_TRANSFER')
         props = context.scene.arantools_smart_transfer
-        col = box.column(align=True)
-        col.prop(props, "source_mesh")
-        col.prop(props, "interp_mode", text="")
-        col.prop(props, "clean_empty")
-        col.operator("arantools.smart_weight_transfer", icon='ARMATURE_DATA')
+        c = box.column(align=True)
+        c.prop(props, "source_mesh")
+        c.prop(props, "interp_mode", text="")
+        c.prop(props, "clean_empty")
+        c.operator("arantools.smart_weight_transfer", icon='ARMATURE_DATA')
 
-        # --- Sync Vertex Groups ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Sync Vertex Groups", icon='GROUP_VERTEX')
         box.label(text="Active mesh must have an armature.", icon='INFO')
         box.operator("arantools.sync_vertex_groups", icon='FILE_REFRESH')
 
-        # --- Unify Island Weights ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Unify Island Weights", icon='SNAP_FACE')
         props = context.scene.arantools_unify_weights
-        col = box.column(align=True)
-        col.prop(props, "blend", slider=True)
-        col.prop(props, "only_selected")
-        col.operator("arantools.unify_island_weights", icon='FULLSCREEN_ENTER')
+        c = box.column(align=True)
+        c.prop(props, "blend", slider=True)
+        c.prop(props, "only_selected")
+        c.operator("arantools.unify_island_weights", icon='FULLSCREEN_ENTER')
 
-        # --- Island Weight Copy ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Island Weight Copy", icon='COPY_ID')
         props = context.scene.arantools_island_copy
-        col = box.column(align=True)
-        col.prop(props, "base_vertex_method", text="Base By")
+        c = box.column(align=True)
+        c.prop(props, "base_vertex_method", text="Base By")
         if props.base_vertex_method == 'ATTRIBUTE':
-            col.prop(props, "base_attribute_name")
-        col.prop(props, "blend_factor", slider=True)
-        col.prop(props, "only_selected")
-        col.operator("arantools.island_weight_copy", icon='FORWARD')
+            c.prop(props, "base_attribute_name")
+        c.prop(props, "blend_factor", slider=True)
+        c.prop(props, "only_selected")
+        c.operator("arantools.island_weight_copy", icon='FORWARD')
 
-        # --- Contact Weight Flooder ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Contact Weight Flooder", icon='PARTICLE_POINT')
         props = context.scene.arantools_contact_flood
-        col = box.column(align=True)
-        col.prop(props, "source")
-        col.prop(props, "blend", slider=True)
-        col.prop(props, "use_selection")
-        col.prop(props, "use_uv")
+        c = box.column(align=True)
+        c.prop(props, "source")
+        c.prop(props, "blend", slider=True)
+        c.prop(props, "use_selection")
+        c.prop(props, "use_uv")
         if props.use_uv:
-            sub = col.box()
+            sub = c.box()
             sub.prop(props, "uv_name")
             row = sub.row(align=True)
             row.prop(props, "uv_axis", expand=True)
             row.prop(props, "uv_direction", expand=True)
-        col.operator("arantools.contact_flood", icon='DRIVER_DISTANCE')
+        c.operator("arantools.contact_flood", icon='DRIVER_DISTANCE')
 
+    # ── Organization ─────────────────────────────────────────────────────────
 
-# ============================================================================
-# Organization sub-panel
-# ============================================================================
+    def _draw_organization(self, layout, context):
+        col = layout.column(align=False)
 
-class ARANTOOLS_PT_organization(Panel):
-    bl_label = "Organization"
-    bl_idname = "ARANTOOLS_PT_organization"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_06')
-
-    def draw(self, context):
-        layout = self.layout
-
-        # --- Batch Rig Transfer ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Batch Rig Transfer", icon='ARMATURE_DATA')
         props = context.scene.arantools_rt_props
-        col = box.column(align=True)
-        col.prop(props, "source_collection")
-        col.prop(props, "gt_collection")
-        col.prop(props, "target_collection")
-        col.separator()
-        col.prop(props, "apply_modifiers")
-        col.prop(props, "transfer_method", text="")
-        col.separator()
-        col.operator("arantools.rt_populate_list", icon='FILE_REFRESH')
-
+        c = box.column(align=True)
+        c.prop(props, "source_collection")
+        c.prop(props, "gt_collection")
+        c.prop(props, "target_collection")
+        c.separator()
+        c.prop(props, "apply_modifiers")
+        c.prop(props, "transfer_method", text="")
+        c.separator()
+        c.operator("arantools.rt_populate_list", icon='FILE_REFRESH')
         if props.binding_list:
             box.label(text="Source → Ground Truth:")
             box.template_list(
                 "ARANTOOLS_UL_RT_BindingList", "",
                 props, "binding_list",
                 props, "binding_index",
-                rows=4
+                rows=4,
             )
             row = box.row()
             row.enabled = bool(props.target_collection)
@@ -253,14 +270,12 @@ class ARANTOOLS_PT_organization(Panel):
             if not props.target_collection:
                 box.label(text="Select a Target Collection!", icon='ERROR')
 
-        # --- Collection Baker ---
-        box = layout.box()
+        box = col.box()
         box.label(text="Collection Baker", icon='RENDER_STILL')
         bake_props = context.scene.arantools_bake_scene
-        col = box.column(align=True)
-        col.prop(bake_props, "source_collection")
-        col.prop(bake_props, "target_collection")
-
+        c = box.column(align=True)
+        c.prop(bake_props, "source_collection")
+        c.prop(bake_props, "target_collection")
         if bake_props.source_collection:
             box.separator()
             mesh_box = box.box()
@@ -277,42 +292,25 @@ class ARANTOOLS_PT_organization(Panel):
         else:
             box.label(text="Select a Source Collection.", icon='INFO')
 
+    # ── Export ───────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Export sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_export(Panel):
-    bl_label = "Export"
-    bl_idname = "ARANTOOLS_PT_export"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_03')
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_export(self, layout, context):
+        col = layout.column(align=False)
         props = context.scene.arantools_arp_export
 
-        # --- ARP Batch Export ---
-        box = layout.box()
+        box = col.box()
         box.label(text="ARP Batch Export", icon='EXPORT')
-        col = box.column(align=True)
-        col.prop(props, "target_armature")
-        col.prop(props, "export_folder")
-        col.separator()
-        col.label(text="Naming Rules:")
-        col.prop(props, "remove_str", text="Remove")
-        row = col.row(align=True)
+        c = box.column(align=True)
+        c.prop(props, "target_armature")
+        c.prop(props, "export_folder")
+        c.separator()
+        c.label(text="Naming Rules:")
+        c.prop(props, "remove_str", text="Remove")
+        row = c.row(align=True)
         row.prop(props, "prefix_str", text="Prefix")
         row.prop(props, "suffix_str", text="Suffix")
-        col.separator()
+        c.separator()
 
-        # Live preview for first selected mesh
         from . import export as _export
         selected_meshes = [
             obj for obj in context.selected_objects
@@ -338,49 +336,33 @@ class ARANTOOLS_PT_export(Panel):
         row.operator("arantools.arp_batch_export", icon='EXPORT')
         box.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
+    # ── Naming ───────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Naming sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_naming(Panel):
-    bl_label = "Naming"
-    bl_idname = "ARANTOOLS_PT_naming"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_05')
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_naming(self, layout, context):
         scene = context.scene
+        col = layout.column(align=False)
 
-        box = layout.box()
+        box = col.box()
         box.label(text="Bone Renamer", icon='SORTALPHA')
-        col = box.column(align=True)
-        col.prop(scene, 'arantools_format', text='Format')
-        col.separator()
+        c = box.column(align=True)
+        c.prop(scene, 'arantools_format', text='Format')
+        c.separator()
 
-        row = col.row(align=True)
+        row = c.row(align=True)
         row.prop(scene, 'arantools_t1', text='T1')
         row.prop(scene, 'arantools_t2', text='T2')
-        row = col.row(align=True)
+        row = c.row(align=True)
         row.prop(scene, 'arantools_t3', text='T3')
         row.prop(scene, 'arantools_t4', text='T4')
-        col.separator()
+        c.separator()
 
-        row = col.row(align=True)
+        row = c.row(align=True)
         row.prop(scene, 'arantools_n1', text='N1')
         row.prop(scene, 'arantools_n2', text='N2')
         row.prop(scene, 'arantools_n3', text='N3')
-        col.prop(scene, 'arantools_inc', text='Counter (INC)')
-        col.separator()
+        c.prop(scene, 'arantools_inc', text='Counter (INC)')
+        c.separator()
 
-        # Live preview
         preview = scene.arantools_format
         preview = preview.replace('N1', '0' + str(scene.arantools_n1))
         preview = preview.replace('N2', '0' + str(scene.arantools_n2))
@@ -390,47 +372,32 @@ class ARANTOOLS_PT_naming(Panel):
         preview = preview.replace('T3', scene.arantools_t3)
         preview = preview.replace('T4', scene.arantools_t4)
         preview = preview.replace('INC', '0' + str(scene.arantools_inc))
-        preview_box = col.box()
+        preview_box = c.box()
         preview_box.label(text=preview if preview else "(empty)", icon='BONE_DATA')
-        col.separator()
+        c.separator()
 
-        row = col.row(align=True)
+        row = c.row(align=True)
         row.operator("arantools.rename_bone", text='Rename  (Alt+Shift+R)', icon='GREASEPENCIL')
-        col.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
+        c.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
 
+    # ── Animation ────────────────────────────────────────────────────────────
 
-# ============================================================================
-# Animation sub-panel
-# ============================================================================
-
-class ARANTOOLS_PT_animation(Panel):
-    bl_label = "Animation"
-    bl_idname = "ARANTOOLS_PT_animation"
-    bl_space_type = _PANEL_SPACE
-    bl_region_type = _PANEL_REGION
-    bl_category = _PANEL_CATEGORY
-    bl_parent_id = "ARANTOOLS_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw_header(self, context):
-        self.layout.label(text="", icon='SEQUENCE_COLOR_08')
-
-    def draw(self, context):
-        layout = self.layout
+    def _draw_animation(self, layout, context):
         scene = context.scene
+        col = layout.column(align=False)
 
-        box = layout.box()
+        box = col.box()
         box.label(text="Noise on Bones", icon='FORCE_TURBULENCE')
-        col = box.column(align=True)
-        col.prop(scene, 'arantools_rotation_strength', text='Rot Strength', slider=True)
-        col.prop(scene, 'arantools_rotation_scale', text='Rot Speed', slider=True)
-        col.prop(scene, 'arantools_location_strenght', text='Loc Strength', slider=True)
-        col.prop(scene, 'arantools_location_scale', text='Loc Speed', slider=True)
-        col.separator()
-        col.prop(scene, 'arantools_frame_length', text='Frame Length')
-        col.prop(scene, 'arantools_blend_duration', text='Blend Duration')
-        col.separator()
-        row = col.row(align=True)
+        c = box.column(align=True)
+        c.prop(scene, 'arantools_rotation_strength', text='Rot Strength', slider=True)
+        c.prop(scene, 'arantools_rotation_scale', text='Rot Speed', slider=True)
+        c.prop(scene, 'arantools_location_strenght', text='Loc Strength', slider=True)
+        c.prop(scene, 'arantools_location_scale', text='Loc Speed', slider=True)
+        c.separator()
+        c.prop(scene, 'arantools_frame_length', text='Frame Length')
+        c.prop(scene, 'arantools_blend_duration', text='Blend Duration')
+        c.separator()
+        row = c.row(align=True)
         row.operator("arantools.apply_noise_rotation", text='Rotation', icon='FORCE_FORCE')
         row.operator("arantools.apply_noise_location", text='Location', icon='FORCE_FORCE')
 
@@ -440,13 +407,9 @@ class ARANTOOLS_PT_animation(Panel):
 # ============================================================================
 
 classes = [
+    ARANTOOLS_PG_PanelState,
+    ARANTOOLS_OT_ToggleSection,
     ARANTOOLS_PT_main,
-    ARANTOOLS_PT_rigging,
-    ARANTOOLS_PT_weight_tools,
-    ARANTOOLS_PT_organization,
-    ARANTOOLS_PT_export,
-    ARANTOOLS_PT_naming,
-    ARANTOOLS_PT_animation,
 ]
 
 
@@ -459,9 +422,13 @@ def register():
     export.register()
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.arantools_panel_state = bpy.props.PointerProperty(
+        type=ARANTOOLS_PG_PanelState
+    )
 
 
 def unregister():
+    del bpy.types.Scene.arantools_panel_state
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     export.unregister()
