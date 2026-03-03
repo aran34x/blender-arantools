@@ -38,11 +38,11 @@ A Blender addon collection for character rigging, weight painting, organization,
 
 Quick bone selection filters for armatures.
 
-| Button | What it does |
-|---|---|
-| **Select Deform Bones** | Selects all bones that have *Deform* enabled |
-| **Control Bones** | Selects all bones prefixed `CTRL_` |
-| **Mech Bones** | Selects all bones prefixed `MCH_` |
+| Button                  | What it does                                 |
+| ----------------------- | -------------------------------------------- |
+| **Select Deform Bones** | Selects all bones that have _Deform_ enabled |
+| **Control Bones**       | Selects all bones prefixed `CTRL_`           |
+| **Mech Bones**          | Selects all bones prefixed `MCH_`            |
 
 **Requirements:** An armature must be the active object.
 
@@ -53,6 +53,7 @@ Quick bone selection filters for armatures.
 Mirrors all `.L` bones to their `.R` counterparts using Blender's built-in Symmetrize.
 
 **How to use:**
+
 1. Select an armature in Object Mode.
 2. Click **Mirror Bones L→R**.
 
@@ -65,6 +66,7 @@ Bones must follow the `.L` / `.R` naming convention. Existing `.R` bones will be
 Automatically rigs feathers, hair strands, or any repeated chain-like mesh by detecting mesh islands and binding each one to its nearest bone via Auto-Rig Pro.
 
 **How to use:**
+
 1. In your mesh, mark **sharp edges** to define island boundaries (one island = one feather).
 2. In Object Mode, select the **mesh** and the **armature**.
 3. Enter Edit Mode on the armature and select the candidate tip bones.
@@ -82,18 +84,20 @@ A two-step workflow for rigging clothing, armor, or accessories that sit on top 
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Target Collection** | Optional — moves the joined result into this collection |
-| **Source Mesh** | The rigged character body to inherit the armature and weights from |
-| **Mapping Method** | Weight interpolation method used during transfer |
+| Property              | Description                                                        |
+| --------------------- | ------------------------------------------------------------------ |
+| **Target Collection** | Optional — moves the joined result into this collection            |
+| **Source Mesh**       | The rigged character body to inherit the armature and weights from |
+| **Mapping Method**    | Weight interpolation method used during transfer                   |
 
 **Step 1 — Join Selected Targets:**
+
 1. Select all the objects you want to rig (clothing pieces, accessories, etc.).
 2. Click **Join Selected Targets**.
    The originals are hidden and a single joined mesh called `Joined_Target` is created.
 
 **Step 2 — Bind and Transfer Weights:**
+
 1. Set **Source Mesh** to the character body.
 2. Make `Joined_Target` the active object.
 3. Click **Bind and Transfer Weights**.
@@ -107,12 +111,13 @@ Iterates through every disconnected mesh island, finds the bone tip nearest to a
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Pointer By** | How to find the pointer location on each island: *Sharp Edge Center* (center of the first sharp edge) or *Highest UV-Y Vertex* |
-| **Chain Length** | How many parent bones to include above the tip bone when binding |
+| Property         | Description                                                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Pointer By**   | How to find the pointer location on each island: _Sharp Edge Center_ (center of the first sharp edge) or _Highest UV-Y Vertex_ |
+| **Chain Length** | How many parent bones to include above the tip bone when binding                                                               |
 
 **How to use:**
+
 1. Select the **mesh** and the **armature**.
 2. In Armature Edit Mode, select all bones that are candidates for chain tips.
 3. Back in Object Mode with both selected, click **Weight from Pointer**.
@@ -132,13 +137,14 @@ Transfers vertex weights from a source mesh to one or more target meshes, then b
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Source** | The rigged mesh to copy weights from |
-| **Method** | *Nearest Vertex*, *Nearest Face (Smooth)*, or *Projected Face* |
-| **Clean Empty Groups** | Remove vertex groups with zero influence after transfer |
+| Property               | Description                                                    |
+| ---------------------- | -------------------------------------------------------------- |
+| **Source**             | The rigged mesh to copy weights from                           |
+| **Method**             | _Nearest Vertex_, _Nearest Face (Smooth)_, or _Projected Face_ |
+| **Clean Empty Groups** | Remove vertex groups with zero influence after transfer        |
 
 **How to use:**
+
 1. Set **Source** to the rigged reference mesh.
 2. Select all target meshes in the viewport.
 3. Click **Transfer & Bind**.
@@ -152,6 +158,7 @@ Meshes with Shape Keys are skipped (Blender limitation).
 Adds empty vertex groups to the active mesh for any deform bones in its armature that don't already have a corresponding group. Useful before weight painting to ensure the full bone list is visible.
 
 **How to use:**
+
 1. Select a mesh that is bound to an armature.
 2. Click **Sync Groups from Armature**.
 
@@ -163,9 +170,9 @@ For each disconnected mesh island, finds the bone with the highest total influen
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Blend** | `0` = no change, `1` = full unification to dominant bone |
+| Property                   | Description                                              |
+| -------------------------- | -------------------------------------------------------- |
+| **Blend**                  | `0` = no change, `1` = full unification to dominant bone |
 | **Only Selected Vertices** | Restrict the operation to vertices selected in Edit Mode |
 
 ---
@@ -176,12 +183,12 @@ Copies weights from a single "base" vertex on each mesh island to every other ve
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Base Vertex By** | How to identify the base vertex per island: *Lowest UV-Y*, *Marked Sharp*, or *Attribute* |
-| **Attribute Name** | Name of a boolean vertex attribute (only used when *Attribute* method is selected) |
-| **Blend Factor** | `0` = no change, `1` = fully replace with base vertex weights |
-| **Only Selected Vertices** | Restrict the operation to vertices selected in Edit Mode |
+| Property                   | Description                                                                               |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| **Base Vertex By**         | How to identify the base vertex per island: _Lowest UV-Y_, _Marked Sharp_, or _Attribute_ |
+| **Attribute Name**         | Name of a boolean vertex attribute (only used when _Attribute_ method is selected)        |
+| **Blend Factor**           | `0` = no change, `1` = fully replace with base vertex weights                             |
+| **Only Selected Vertices** | Restrict the operation to vertices selected in Edit Mode                                  |
 
 ---
 
@@ -193,16 +200,17 @@ Designed for accessories that are physically touching the character (e.g. a shou
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Source** | The rigged mesh to sample weights from |
-| **Blend** | Blend factor between existing and flooded weights |
+| Property               | Description                                            |
+| ---------------------- | ------------------------------------------------------ |
+| **Source**             | The rigged mesh to sample weights from                 |
+| **Blend**              | Blend factor between existing and flooded weights      |
 | **Use Selected Verts** | Use only selected vertices to locate the contact point |
-| **Use UV Fallback** | If no vertices are selected, use a UV extreme instead |
-| **UV Map** | Name of the UV map to use for the fallback |
-| **Axis / Direction** | Which UV extreme to use (U/V, Min/Max) |
+| **Use UV Fallback**    | If no vertices are selected, use a UV extreme instead  |
+| **UV Map**             | Name of the UV map to use for the fallback             |
+| **Axis / Direction**   | Which UV extreme to use (U/V, Min/Max)                 |
 
 **How to use:**
+
 1. Set **Source** to the rigged body mesh.
 2. Select all secondary meshes (and optionally select the contact vertices on them).
 3. Click **Flood Weights**.
@@ -215,19 +223,20 @@ The tool automatically separates loose parts, processes each one, then rejoins t
 
 ### Batch Rig Transfer
 
-Batch-rigs a collection of unrigged meshes by transferring weights from a collection of already-rigged "ground truth" meshes. Meshes are matched by name automatically using a *Reverse Token Priority* algorithm.
+Batch-rigs a collection of unrigged meshes by transferring weights from a collection of already-rigged "ground truth" meshes. Meshes are matched by name automatically using a _Reverse Token Priority_ algorithm.
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Source Collection** | The raw, unrigged meshes to process |
-| **Ground Truth Collection** | Already-rigged reference meshes to transfer weights from |
-| **Target Collection** | Where the finished rigged duplicates will be placed |
-| **Apply Modifiers** | Apply existing modifiers (Mirror, Subsurf, etc.) before rigging |
-| **Transfer Method** | Weight interpolation method |
+| Property                    | Description                                                     |
+| --------------------------- | --------------------------------------------------------------- |
+| **Source Collection**       | The raw, unrigged meshes to process                             |
+| **Ground Truth Collection** | Already-rigged reference meshes to transfer weights from        |
+| **Target Collection**       | Where the finished rigged duplicates will be placed             |
+| **Apply Modifiers**         | Apply existing modifiers (Mirror, Subsurf, etc.) before rigging |
+| **Transfer Method**         | Weight interpolation method                                     |
 
 **How to use:**
+
 1. Set the three collections.
 2. Click **Load & Smart Match** — the tool populates a list of source meshes and attempts to pair each one with its ground truth counterpart by name.
 3. Review and correct any mismatches in the list.
@@ -242,6 +251,7 @@ Batch-rigs a collection of unrigged meshes by transferring weights from a collec
 Duplicates all meshes in a source collection, applies all their modifiers ("Convert to Mesh"), then joins objects that share the same **Target Name** into a single mesh. The source collection is hidden and the result placed in the target collection.
 
 **How to use:**
+
 1. Set **Source Collection** and **Target Collection**.
 2. For each mesh in the source list, optionally type a **Target Name**. Meshes sharing the same Target Name will be joined together. Meshes with no Target Name keep their own name.
 3. Click **Bake & Join**.
@@ -256,20 +266,21 @@ Batch-exports selected meshes as individual FBX files using Auto-Rig Pro's expor
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Armature** | The Auto-Rig Pro armature to export with each mesh |
-| **Export Folder** | Destination folder for the FBX files |
-| **Remove Text** | Comma-separated strings to strip from filenames (e.g. `_Rigged, _lod0`) |
-| **Prefix / Suffix** | Text to prepend or append to every filename |
+| Property            | Description                                                             |
+| ------------------- | ----------------------------------------------------------------------- |
+| **Armature**        | The Auto-Rig Pro armature to export with each mesh                      |
+| **Export Folder**   | Destination folder for the FBX files                                    |
+| **Remove Text**     | Comma-separated strings to strip from filenames (e.g. `_Rigged, _lod0`) |
+| **Prefix / Suffix** | Text to prepend or append to every filename                             |
 
 A **live filename preview** shows the original and final name for the first selected mesh.
 
 **How to use:**
+
 1. Set the **Armature** and **Export Folder**.
 2. Configure naming rules.
 3. Select the meshes to export in the viewport.
-4. Click **Batch Export Objects**.
+4. Click **Batch Export Rigged Meshes**.
 
 **Requirements:** Auto-Rig Pro.
 
@@ -283,17 +294,18 @@ Template-based bone renaming with an auto-incrementing counter. Renames the acti
 
 **Format string tokens:**
 
-| Token | Replaced with |
-|---|---|
-| `T1` `T2` `T3` `T4` | The corresponding text field value |
-| `N1` `N2` `N3` | The corresponding number field value |
-| `INC` | The current counter value (auto-increments after each rename) |
+| Token               | Replaced with                                                 |
+| ------------------- | ------------------------------------------------------------- |
+| `T1` `T2` `T3` `T4` | The corresponding text field value                            |
+| `N1` `N2` `N3`      | The corresponding number field value                          |
+| `INC`               | The current counter value (auto-increments after each rename) |
 
 **Default format:** `T1_INC` → e.g. `name_01`
 
 A **live preview** below the fields shows the exact name that will be applied before you click Rename.
 
 **Keyboard shortcuts:**
+
 - `Alt + Shift + R` — Rename active bone
 - `Shift + Y` — Reset counter to 1
 
@@ -309,16 +321,17 @@ Adds procedural noise to bone F-curves using Blender's built-in NOISE FCurve mod
 
 **Properties:**
 
-| Property | Description |
-|---|---|
-| **Rot Strength** | Amplitude of the rotation noise |
-| **Rot Speed** | Frequency of the rotation noise |
-| **Loc Strength** | Amplitude of the location noise |
-| **Loc Speed** | Frequency of the location noise |
-| **Frame Length** | Total frame range the noise is restricted to |
+| Property           | Description                                          |
+| ------------------ | ---------------------------------------------------- |
+| **Rot Strength**   | Amplitude of the rotation noise                      |
+| **Rot Speed**      | Frequency of the rotation noise                      |
+| **Loc Strength**   | Amplitude of the location noise                      |
+| **Loc Speed**      | Frequency of the location noise                      |
+| **Frame Length**   | Total frame range the noise is restricted to         |
 | **Blend Duration** | Number of frames to fade in/out at the start and end |
 
 **How to use:**
+
 1. In Pose Mode, select the bones you want to affect.
 2. Adjust the settings.
 3. Click **Rotation** to add noise to rotation channels, **Location** for location channels, or both.

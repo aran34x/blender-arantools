@@ -67,7 +67,7 @@ class ARP_Batch_Properties(bpy.types.PropertyGroup):
 class ARP_OT_BatchExport(bpy.types.Operator):
     """Batch Export Selected Objects using Auto-Rig Pro"""
     bl_idname = "arp.batch_export_tool"
-    bl_label = "Batch Export Objects"
+    bl_label = "Batch Export Rigged Meshes"
     
     def execute(self, context):
         scene = context.scene

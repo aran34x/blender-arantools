@@ -37,7 +37,7 @@ class ARANTOOLS_PG_ARPExport(bpy.types.PropertyGroup):
 class ARANTOOLS_OT_ARPBatchExport(Operator):
     """Batch export all selected meshes as FBX using Auto-Rig Pro"""
     bl_idname = "arantools.arp_batch_export"
-    bl_label = "Batch Export Objects"
+    bl_label = "Batch Export Rigged Meshes"
 
     def execute(self, context):
         props = context.scene.arantools_arp_export

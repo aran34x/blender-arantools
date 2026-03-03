@@ -28,6 +28,56 @@ _PANEL_CATEGORY = 'Aran Tools'
 # Main panel — single panel with icon tab switcher
 # ============================================================================
 
+class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
+    bl_idname = "arantools.reload_addon"
+    bl_label = "Reload Addon"
+    bl_description = "Reload Aran Tools, picking up any code changes without restarting Blender"
+
+    def execute(self, context):
+        import addon_utils
+
+        def do_reload():
+            addon_utils.disable("arantools", default_set=False)
+            addon_utils.enable("arantools", default_set=False)
+
+        bpy.app.timers.register(do_reload, first_interval=0.0)
+        return {'FINISHED'}
+
+
+# ============================================================================
+# Tool registry  (id, name, description, tab, icon, draw-method name)
+# ============================================================================
+
+_TOOL_REGISTRY = [
+    ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform'),
+    ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger'),
+    ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind'),
+    ('weight_pointer', 'Weight from Pointer',    'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING',      'CURVE_PATH',         '_draw_t_weight_pointer'),
+    ('smart_transfer', 'Smart Weight Transfer',  'Copy vertex weights from a source mesh with interpolation options',               'WEIGHT',       'MOD_DATA_TRANSFER',  '_draw_t_smart_transfer'),
+    ('sync_vgroups',   'Sync Vertex Groups',     'Add missing vertex groups from the armature to the active mesh',                  'WEIGHT',       'GROUP_VERTEX',       '_draw_t_sync_vgroups'),
+    ('unify_island',   'Unify Island Weights',   'Blend and unify vertex weights uniformly across UV islands',                      'WEIGHT',       'SNAP_FACE',          '_draw_t_unify_island'),
+    ('island_copy',    'Island Weight Copy',     'Copy weights from one mesh island to others using a base vertex reference',       'WEIGHT',       'COPY_ID',            '_draw_t_island_copy'),
+    ('contact_flood',  'Contact Weight Flooder', 'Flood vertex weights based on proximity or UV contact with a source object',      'WEIGHT',       'PARTICLE_POINT',     '_draw_t_contact_flood'),
+    ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig'),
+    ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker'),
+    ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export'),
+    ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer'),
+    ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones'),
+]
+
+_OPEN_TOOL_IDS = [entry[0] for entry in _TOOL_REGISTRY]
+
+
+class ARANTOOLS_OT_clear_search(bpy.types.Operator):
+    bl_idname = "arantools.clear_search"
+    bl_label = "Clear Search"
+    bl_description = "Clear the tool search filter"
+
+    def execute(self, context):
+        context.scene.arantools_search = ""
+        return {'FINISHED'}
+
+
 class ARANTOOLS_PT_main(Panel):
     bl_label = "Aran Tools"
     bl_idname = "ARANTOOLS_PT_main"
@@ -39,47 +89,113 @@ class ARANTOOLS_PT_main(Panel):
         layout = self.layout
         scene = context.scene
 
-        # Icon-only tab bar
+        # ── Search box ────────────────────────────────────────────────────
         row = layout.row(align=True)
-        row.scale_y = 1.3
-        row.prop(scene, 'arantools_active_tab', expand=True)
+        row.prop(scene, 'arantools_search', text="", icon='VIEWZOOM')
+        if scene.arantools_search:
+            row.operator("arantools.clear_search", text="", icon='X')
 
+        search = scene.arantools_search.strip().lower()
+        if search:
+            self._draw_search(layout, scene, context, search)
+            return
+
+        # ── Active tab name ───────────────────────────────────────────────
+        tab_info = {
+            'RIGGING':      ('Rigging',      'ARMATURE_DATA'),
+            'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
+            'ORGANIZATION': ('Organization', 'OUTLINER'),
+            'EXPORT':       ('Export',       'EXPORT'),
+            'NAMING':       ('Naming',       'SORTALPHA'),
+            'ANIMATION':    ('Animation',    'ANIM'),
+        }
+        tab_name, tab_icon = tab_info[scene.arantools_active_tab]
+        layout.label(text=tab_name, icon=tab_icon)
         layout.separator(factor=0.5)
 
-        tab = scene.arantools_active_tab
-        if tab == 'RIGGING':
-            self._draw_rigging(layout, context)
-        elif tab == 'WEIGHT':
-            self._draw_weight_tools(layout, context)
-        elif tab == 'ORGANIZATION':
-            self._draw_organization(layout, context)
-        elif tab == 'EXPORT':
-            self._draw_export(layout, context)
-        elif tab == 'NAMING':
-            self._draw_naming(layout, context)
-        elif tab == 'ANIMATION':
-            self._draw_animation(layout, context)
+        main_row = layout.row()
 
-    # ── Rigging ──────────────────────────────────────────────────────────────
+        # ── Vertical icon tabs on the left with color coding ──────────────
+        tab_col = main_row.column(align=True)
+        tab_col.scale_x = 1.3
+        tab_col.scale_y = 1.3
 
-    def _draw_rigging(self, layout, context):
-        props = context.scene.arantools_adv_rigging
+        tabs = [
+            ('RIGGING',      'ARMATURE_DATA',     'COLORSET_11_VEC'),
+            ('WEIGHT',       'MOD_VERTEX_WEIGHT', 'COLORSET_02_VEC'),
+            ('ORGANIZATION', 'OUTLINER',          'COLORSET_06_VEC'),
+            ('EXPORT',       'EXPORT',            'COLORSET_12_VEC'),
+            ('NAMING',       'SORTALPHA',         'COLORSET_03_VEC'),
+            ('ANIMATION',    'ANIM',              'COLORSET_05_VEC'),
+        ]
 
+        for tab_value, tab_icon, color_icon in tabs:
+            row = tab_col.row(align=True)
+            color_sub = row.row()
+            color_sub.scale_x = 0.4
+            color_sub.label(text="", icon=color_icon)
+            row.prop_enum(scene, 'arantools_active_tab', tab_value, text="", icon=tab_icon)
+
+        tab_col.separator()
+        tab_col.operator("arantools.reload_addon", text="", icon='FILE_REFRESH')
+
+        # ── Content area — collapsible tool sections ──────────────────────
+        content_col = main_row.column()
+        active_tab = scene.arantools_active_tab
+        for tool_id, tool_name, _, tool_tab, tool_icon, draw_method in _TOOL_REGISTRY:
+            if tool_tab != active_tab:
+                continue
+            box, expanded = self._section(content_col, scene, tool_id, tool_name, tool_icon)
+            if expanded:
+                getattr(self, draw_method)(box, context)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _section(self, layout, scene, tool_id, label, icon):
+        """Draw a collapsible section header. Returns (box, is_expanded)."""
+        prop_name = f'arantools_open_{tool_id}'
+        expanded = getattr(scene, prop_name)
         box = layout.box()
-        box.label(text="Selection", icon='FILTER')
-        box.operator("arantools.select_deform_bones", icon='BONE_DATA')
         row = box.row(align=True)
-        row.operator("arantools.select_bone_type", text="Control Bones").bone_type = 'CONTROL'
-        row.operator("arantools.select_bone_type", text="Mech Bones").bone_type = 'MECH'
+        row.prop(scene, prop_name, text="",
+                 icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
+        row.label(text=label, icon=icon)
+        return box, expanded
 
-        box = layout.box()
-        box.label(text="Mirror", icon='MOD_MIRROR')
-        box.operator("arantools.mirror_bones", icon='MOD_MIRROR')
+    def _draw_search(self, layout, scene, context, search):
+        """Draw filtered tools from all tabs matching the search term."""
+        tab_labels = {
+            'RIGGING':      ('Rigging',      'ARMATURE_DATA'),
+            'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
+            'ORGANIZATION': ('Organization', 'OUTLINER'),
+            'EXPORT':       ('Export',       'EXPORT'),
+            'NAMING':       ('Naming',       'SORTALPHA'),
+            'ANIMATION':    ('Animation',    'ANIM'),
+        }
+        found = False
+        current_tab = None
+        for tool_id, tool_name, tool_desc, tool_tab, tool_icon, draw_method in _TOOL_REGISTRY:
+            if search not in tool_name.lower() and search not in tool_desc.lower():
+                continue
+            found = True
+            if tool_tab != current_tab:
+                current_tab = tool_tab
+                tab_name, tab_icon = tab_labels[tool_tab]
+                layout.label(text=tab_name, icon=tab_icon)
+            box, expanded = self._section(layout, scene, tool_id, tool_name, tool_icon)
+            if expanded:
+                getattr(self, draw_method)(box, context)
+        if not found:
+            layout.label(text="No tools match your search.", icon='INFO')
 
-        box = layout.box()
-        box.label(text="Feather Rigger", icon='OUTLINER_OB_CURVES')
+    # ── Individual tool content ───────────────────────────────────────────────
+
+    def _draw_t_select_deform(self, layout, context):
+        layout.operator("arantools.select_deform_bones", icon='BONE_DATA')
+
+    def _draw_t_feather_rigger(self, layout, context):
         fr = context.scene.arantools_feather_rig
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(fr, "target_armature")
         col.separator()
         col.label(text="Matching:", icon='CON_TRACKTO')
@@ -103,54 +219,51 @@ class ARANTOOLS_PT_main(Panel):
         if fr.weight_method == 'ARP':
             col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
-        box = layout.box()
-        box.label(text="Join & Bind", icon='MOD_DATA_TRANSFER')
-        col = box.column(align=True)
-        col.prop(props, "target_collection")
-        col.operator("arantools.join_targets", icon='OBJECT_DATAMODE')
+    def _draw_t_join_bind(self, layout, context):
+        props = context.scene.arantools_adv_rigging
+        col = layout.column(align=True)
+        col.label(text="Step 1 — Join", icon='OBJECT_DATAMODE')
+        col.label(text="Select costume meshes in viewport first", icon='MOUSE_LMB')
+        col.prop(props, "target_collection", text="Output Collection")
+        col.operator("arantools.join_targets", text="Join Selected into One Mesh", icon='OBJECT_DATAMODE')
         col.separator()
-        col.prop(props, "source_mesh")
-        col.prop(props, "mapping_method", text="")
-        col.operator("arantools.bind_and_transfer", icon='ARMATURE_DATA')
+        col.label(text="Step 2 — Bind", icon='ARMATURE_DATA')
+        col.label(text="Make the joined mesh active first", icon='MOUSE_LMB')
+        col.prop(props, "source_mesh", text="Rigged Body")
+        col.prop(props, "mapping_method", text="Vertex Mapping")
+        col.operator("arantools.bind_and_transfer", text="Bind & Copy Weights", icon='ARMATURE_DATA')
 
-        box = layout.box()
-        box.label(text="Weight from Pointer  (ARP)", icon='BONE_DATA')
-        col = box.column(align=True)
+    def _draw_t_weight_pointer(self, layout, context):
+        props = context.scene.arantools_adv_rigging
+        col = layout.column(align=True)
         col.prop(props, "sharp_edge_pointer_method", text="Pointer By")
         col.prop(props, "chain_length")
         col.operator("arantools.weight_from_pointer", icon='CURVE_PATH')
         col.operator("arantools.direct_arp_bind", icon='LINKED')
         col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
-    # ── Weight Tools ─────────────────────────────────────────────────────────
-
-    def _draw_weight_tools(self, layout, context):
-        box = layout.box()
-        box.label(text="Smart Weight Transfer", icon='MOD_DATA_TRANSFER')
+    def _draw_t_smart_transfer(self, layout, context):
         props = context.scene.arantools_smart_transfer
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "source_mesh")
         col.prop(props, "interp_mode", text="")
         col.prop(props, "clean_empty")
         col.operator("arantools.smart_weight_transfer", icon='ARMATURE_DATA')
 
-        box = layout.box()
-        box.label(text="Sync Vertex Groups", icon='GROUP_VERTEX')
-        box.label(text="Active mesh must have an armature.", icon='INFO')
-        box.operator("arantools.sync_vertex_groups", icon='FILE_REFRESH')
+    def _draw_t_sync_vgroups(self, layout, context):
+        layout.label(text="Active mesh must have an armature.", icon='INFO')
+        layout.operator("arantools.sync_vertex_groups", icon='FILE_REFRESH')
 
-        box = layout.box()
-        box.label(text="Unify Island Weights", icon='SNAP_FACE')
+    def _draw_t_unify_island(self, layout, context):
         props = context.scene.arantools_unify_weights
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "blend", slider=True)
         col.prop(props, "only_selected")
         col.operator("arantools.unify_island_weights", icon='FULLSCREEN_ENTER')
 
-        box = layout.box()
-        box.label(text="Island Weight Copy", icon='COPY_ID')
+    def _draw_t_island_copy(self, layout, context):
         props = context.scene.arantools_island_copy
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "base_vertex_method", text="Base By")
         if props.base_vertex_method == 'ATTRIBUTE':
             col.prop(props, "base_attribute_name")
@@ -158,10 +271,9 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "only_selected")
         col.operator("arantools.island_weight_copy", icon='FORWARD')
 
-        box = layout.box()
-        box.label(text="Contact Weight Flooder", icon='PARTICLE_POINT')
+    def _draw_t_contact_flood(self, layout, context):
         props = context.scene.arantools_contact_flood
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "source")
         col.prop(props, "blend", slider=True)
         col.prop(props, "use_selection")
@@ -174,13 +286,9 @@ class ARANTOOLS_PT_main(Panel):
             row.prop(props, "uv_direction", expand=True)
         col.operator("arantools.contact_flood", icon='DRIVER_DISTANCE')
 
-    # ── Organization ─────────────────────────────────────────────────────────
-
-    def _draw_organization(self, layout, context):
-        box = layout.box()
-        box.label(text="Batch Rig Transfer", icon='ARMATURE_DATA')
+    def _draw_t_batch_rig(self, layout, context):
         props = context.scene.arantools_rt_props
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "source_collection")
         col.prop(props, "gt_collection")
         col.prop(props, "target_collection")
@@ -190,28 +298,27 @@ class ARANTOOLS_PT_main(Panel):
         col.separator()
         col.operator("arantools.rt_populate_list", icon='FILE_REFRESH')
         if props.binding_list:
-            box.label(text="Source -> Ground Truth:")
-            box.template_list(
+            layout.label(text="Source -> Ground Truth:")
+            layout.template_list(
                 "ARANTOOLS_UL_RT_BindingList", "",
                 props, "binding_list",
                 props, "binding_index",
                 rows=4,
             )
-            row = box.row()
+            row = layout.row()
             row.enabled = bool(props.target_collection)
             row.operator("arantools.rt_execute_rigging", icon='PLAY')
             if not props.target_collection:
-                box.label(text="Select a Target Collection!", icon='ERROR')
+                layout.label(text="Select a Target Collection!", icon='ERROR')
 
-        box = layout.box()
-        box.label(text="Collection Baker", icon='RENDER_STILL')
+    def _draw_t_coll_baker(self, layout, context):
         bake_props = context.scene.arantools_bake_scene
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(bake_props, "source_collection")
         col.prop(bake_props, "target_collection")
         if bake_props.source_collection:
-            box.separator()
-            mesh_box = box.box()
+            layout.separator()
+            mesh_box = layout.box()
             mesh_box.label(text="Set Target Names:", icon='OUTLINER_OB_MESH')
             for obj in bake_props.source_collection.objects:
                 if obj.type != 'MESH':
@@ -219,20 +326,15 @@ class ARANTOOLS_PT_main(Panel):
                 row = mesh_box.row(align=True)
                 row.label(text=obj.name, icon='MESH_DATA')
                 row.prop(obj.arantools_bake_props, "target_name", text="")
-            row = box.row()
+            row = layout.row()
             row.scale_y = 1.4
             row.operator("arantools.collection_bake", icon='RENDER_STILL')
         else:
-            box.label(text="Select a Source Collection.", icon='INFO')
+            layout.label(text="Select a Source Collection.", icon='INFO')
 
-    # ── Export ───────────────────────────────────────────────────────────────
-
-    def _draw_export(self, layout, context):
+    def _draw_t_arp_export(self, layout, context):
         props = context.scene.arantools_arp_export
-
-        box = layout.box()
-        box.label(text="ARP Batch Export", icon='EXPORT')
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(props, "target_armature")
         col.prop(props, "export_folder")
         col.separator()
@@ -242,14 +344,13 @@ class ARANTOOLS_PT_main(Panel):
         row.prop(props, "prefix_str", text="Prefix")
         row.prop(props, "suffix_str", text="Suffix")
         col.separator()
-
         from . import export as _export
         selected_meshes = [
             obj for obj in context.selected_objects
             if obj != props.target_armature and obj.type == 'MESH'
         ]
         if selected_meshes:
-            preview_box = box.box()
+            preview_box = layout.box()
             obj = selected_meshes[0]
             final_name = _export._get_final_filename(obj.name, props)
             preview_box.label(text="Org:  " + obj.name, icon='OBJECT_DATAMODE')
@@ -260,25 +361,18 @@ class ARANTOOLS_PT_main(Panel):
             if len(selected_meshes) > 1:
                 preview_box.label(text="+ " + str(len(selected_meshes) - 1) + " more selected")
         else:
-            box.label(text="Select meshes to preview.", icon='INFO')
-
-        row = box.row()
+            layout.label(text="Select meshes to preview.", icon='INFO')
+        row = layout.row()
         row.scale_y = 1.4
         row.enabled = bool(props.target_armature)
         row.operator("arantools.arp_batch_export", icon='EXPORT')
-        box.label(text="Requires Auto-Rig Pro", icon='ERROR')
+        layout.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
-    # ── Naming ───────────────────────────────────────────────────────────────
-
-    def _draw_naming(self, layout, context):
+    def _draw_t_bone_renamer(self, layout, context):
         scene = context.scene
-
-        box = layout.box()
-        box.label(text="Bone Renamer", icon='SORTALPHA')
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(scene, 'arantools_format', text='Format')
         col.separator()
-
         row = col.row(align=True)
         row.prop(scene, 'arantools_t1', text='T1')
         row.prop(scene, 'arantools_t2', text='T2')
@@ -286,14 +380,12 @@ class ARANTOOLS_PT_main(Panel):
         row.prop(scene, 'arantools_t3', text='T3')
         row.prop(scene, 'arantools_t4', text='T4')
         col.separator()
-
         row = col.row(align=True)
         row.prop(scene, 'arantools_n1', text='N1')
         row.prop(scene, 'arantools_n2', text='N2')
         row.prop(scene, 'arantools_n3', text='N3')
         col.prop(scene, 'arantools_inc', text='Counter (INC)')
         col.separator()
-
         preview = scene.arantools_format
         preview = preview.replace('N1', '0' + str(scene.arantools_n1))
         preview = preview.replace('N2', '0' + str(scene.arantools_n2))
@@ -306,19 +398,13 @@ class ARANTOOLS_PT_main(Panel):
         preview_box = col.box()
         preview_box.label(text=preview if preview else "(empty)", icon='BONE_DATA')
         col.separator()
-
         row = col.row(align=True)
         row.operator("arantools.rename_bone", text='Rename  (Alt+Shift+R)', icon='GREASEPENCIL')
         col.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
 
-    # ── Animation ────────────────────────────────────────────────────────────
-
-    def _draw_animation(self, layout, context):
+    def _draw_t_noise_bones(self, layout, context):
         scene = context.scene
-
-        box = layout.box()
-        box.label(text="Noise on Bones", icon='FORCE_TURBULENCE')
-        col = box.column(align=True)
+        col = layout.column(align=True)
         col.prop(scene, 'arantools_rotation_strength', text='Rot Strength', slider=True)
         col.prop(scene, 'arantools_rotation_scale', text='Rot Speed', slider=True)
         col.prop(scene, 'arantools_location_strenght', text='Loc Strength', slider=True)
@@ -337,6 +423,8 @@ class ARANTOOLS_PT_main(Panel):
 # ============================================================================
 
 classes = [
+    ARANTOOLS_OT_reload_addon,
+    ARANTOOLS_OT_clear_search,
     ARANTOOLS_PT_main,
 ]
 
@@ -349,7 +437,6 @@ def register():
     organization.register()
     export.register()
 
-    # Tab switcher — empty names so expand=True shows icons only
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
             ('RIGGING',       "", "Rigging",       'ARMATURE_DATA',      0),
@@ -362,12 +449,26 @@ def register():
         default='RIGGING',
     )
 
+    bpy.types.Scene.arantools_search = bpy.props.StringProperty(
+        name="Search Tools",
+        description="Filter tools by name or description",
+        default="",
+        options={'TEXTEDIT_UPDATE'},
+    )
+
+    for tool_id in _OPEN_TOOL_IDS:
+        setattr(bpy.types.Scene, f'arantools_open_{tool_id}',
+                bpy.props.BoolProperty(default=False))
+
     for cls in classes:
         bpy.utils.register_class(cls)
 
 
 def unregister():
     del bpy.types.Scene.arantools_active_tab
+    del bpy.types.Scene.arantools_search
+    for tool_id in _OPEN_TOOL_IDS:
+        delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     export.unregister()
