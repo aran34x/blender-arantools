@@ -17,6 +17,7 @@ from . import naming
 from . import weight_tools
 from . import organization
 from . import export
+from . import island_flatten
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -34,9 +35,22 @@ class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
     bl_description = "Reload Aran Tools, picking up any code changes without restarting Blender"
 
     def execute(self, context):
+        import importlib
+        import sys
         import addon_utils
 
         def do_reload():
+            # Force-reload every cached arantools module from disk first
+            submod_names = sorted(
+                k for k in sys.modules
+                if k == 'arantools' or k.startswith('arantools.')
+            )
+            for mod_name in submod_names:
+                try:
+                    importlib.reload(sys.modules[mod_name])
+                except Exception as e:
+                    print(f"[AranTools] reload warning – {mod_name}: {e}")
+
             addon_utils.disable("arantools", default_set=False)
             addon_utils.enable("arantools", default_set=False)
 
@@ -49,23 +63,27 @@ class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
 # ============================================================================
 
 _TOOL_REGISTRY = [
-    ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform'),
-    ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger'),
-    ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind'),
-    ('weight_pointer', 'Weight from Pointer',    'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING',      'CURVE_PATH',         '_draw_t_weight_pointer'),
-    ('smart_transfer', 'Smart Weight Transfer',  'Copy vertex weights from a source mesh with interpolation options',               'WEIGHT',       'MOD_DATA_TRANSFER',  '_draw_t_smart_transfer'),
-    ('sync_vgroups',   'Sync Vertex Groups',     'Add missing vertex groups from the armature to the active mesh',                  'WEIGHT',       'GROUP_VERTEX',       '_draw_t_sync_vgroups'),
-    ('unify_island',   'Unify Island Weights',   'Blend and unify vertex weights uniformly across UV islands',                      'WEIGHT',       'SNAP_FACE',          '_draw_t_unify_island'),
-    ('island_copy',    'Island Weight Copy',     'Copy weights from one mesh island to others using a base vertex reference',       'WEIGHT',       'COPY_ID',            '_draw_t_island_copy'),
-    ('contact_flood',  'Contact Weight Flooder', 'Flood vertex weights based on proximity or UV contact with a source object',      'WEIGHT',       'PARTICLE_POINT',     '_draw_t_contact_flood'),
-    ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig'),
-    ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker'),
-    ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export'),
-    ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer'),
-    ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones'),
+    # (id, name, description, tab, icon, draw_method, is_small)
+    # is_small=True: always expanded, no collapse toggle (for single-button tools)
+    ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform',  True),
+    ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger', False),
+    ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind',      False),
+    ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
+    ('island_flatten',   'Flatten Island Weights',   'Average deform bone weights across each mesh island so the island bends as a rigid unit', 'RIGGING', 'MOD_SMOOTH', '_draw_t_island_flatten',   False),
+    ('smart_transfer', 'Smart Weight Transfer',  'Copy vertex weights from a source mesh with interpolation options',               'WEIGHT',       'MOD_DATA_TRANSFER',  '_draw_t_smart_transfer', False),
+    ('sync_vgroups',   'Sync Vertex Groups',     'Add missing vertex groups from the armature to the active mesh',                  'WEIGHT',       'GROUP_VERTEX',       '_draw_t_sync_vgroups',   True),
+    ('unify_island',   'Unify Island Weights',   'Blend and unify vertex weights uniformly across UV islands',                      'WEIGHT',       'SNAP_FACE',          '_draw_t_unify_island',   False),
+    ('island_copy',    'Island Weight Copy',     'Copy weights from one mesh island to others using a base vertex reference',       'WEIGHT',       'COPY_ID',            '_draw_t_island_copy',    False),
+    ('contact_flood',  'Contact Weight Flooder', 'Flood vertex weights based on proximity or UV contact with a source object',      'WEIGHT',       'PARTICLE_POINT',     '_draw_t_contact_flood',  False),
+    ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig',      False),
+    ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
+    ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
+    ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
+    ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
 ]
 
-_OPEN_TOOL_IDS = [entry[0] for entry in _TOOL_REGISTRY]
+# Only collapsible (non-small) tools need a BoolProperty
+_OPEN_TOOL_IDS = [entry[0] for entry in _TOOL_REGISTRY if not entry[6]]
 
 
 class ARANTOOLS_OT_clear_search(bpy.types.Operator):
@@ -142,21 +160,28 @@ class ARANTOOLS_PT_main(Panel):
         # ── Content area — collapsible tool sections ──────────────────────
         content_col = main_row.column()
         active_tab = scene.arantools_active_tab
-        for tool_id, tool_name, _, tool_tab, tool_icon, draw_method in _TOOL_REGISTRY:
+        for tool_id, tool_name, tool_desc, tool_tab, tool_icon, draw_method, is_small in _TOOL_REGISTRY:
             if tool_tab != active_tab:
                 continue
-            box, expanded = self._section(content_col, scene, tool_id, tool_name, tool_icon)
+            box, expanded = self._section(content_col, scene, tool_id, tool_name, tool_icon, is_small)
             if expanded:
                 getattr(self, draw_method)(box, context)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _section(self, layout, scene, tool_id, label, icon):
-        """Draw a collapsible section header. Returns (box, is_expanded)."""
-        prop_name = f'arantools_open_{tool_id}'
-        expanded = getattr(scene, prop_name)
+    def _section(self, layout, scene, tool_id, label, icon, is_small=False):
+        """Draw a section header. Returns (box, is_expanded).
+
+        Small tools are always expanded with no collapse toggle.
+        Collapsible tools show a tooltip (the tool description) on the toggle.
+        """
         box = layout.box()
         row = box.row(align=True)
+        if is_small:
+            row.label(text=label, icon=icon)
+            return box, True
+        prop_name = f'arantools_open_{tool_id}'
+        expanded = getattr(scene, prop_name)
         row.prop(scene, prop_name, text="",
                  icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
         row.label(text=label, icon=icon)
@@ -174,7 +199,7 @@ class ARANTOOLS_PT_main(Panel):
         }
         found = False
         current_tab = None
-        for tool_id, tool_name, tool_desc, tool_tab, tool_icon, draw_method in _TOOL_REGISTRY:
+        for tool_id, tool_name, tool_desc, tool_tab, tool_icon, draw_method, is_small in _TOOL_REGISTRY:
             if search not in tool_name.lower() and search not in tool_desc.lower():
                 continue
             found = True
@@ -182,7 +207,7 @@ class ARANTOOLS_PT_main(Panel):
                 current_tab = tool_tab
                 tab_name, tab_icon = tab_labels[tool_tab]
                 layout.label(text=tab_name, icon=tab_icon)
-            box, expanded = self._section(layout, scene, tool_id, tool_name, tool_icon)
+            box, expanded = self._section(layout, scene, tool_id, tool_name, tool_icon, is_small)
             if expanded:
                 getattr(self, draw_method)(box, context)
         if not found:
@@ -240,6 +265,14 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "chain_length")
         col.operator("arantools.weight_from_pointer", icon='CURVE_PATH')
         col.operator("arantools.direct_arp_bind", icon='LINKED')
+
+    def _draw_t_island_flatten(self, layout, context):
+        props = context.scene.arantools_island_flatten
+        col = layout.column(align=True)
+        col.prop(props, "blend", slider=True)
+        col.prop(props, "only_selected")
+        col.separator()
+        col.operator("arantools.island_flatten_weights", icon='MOD_SMOOTH')
         col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
     def _draw_t_smart_transfer(self, layout, context):
@@ -362,10 +395,11 @@ class ARANTOOLS_PT_main(Panel):
                 preview_box.label(text="+ " + str(len(selected_meshes) - 1) + " more selected")
         else:
             layout.label(text="Select meshes to preview.", icon='INFO')
-        row = layout.row()
+        row = layout.row(align=True)
         row.scale_y = 1.4
         row.enabled = bool(props.target_armature)
-        row.operator("arantools.arp_batch_export", icon='EXPORT')
+        row.operator("arantools.arp_batch_export", text="Export Meshes", icon='EXPORT')
+        row.operator("arantools.arp_anim_export",  text="Animations",    icon='ANIM')
         layout.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
     def _draw_t_bone_renamer(self, layout, context):
@@ -436,6 +470,7 @@ def register():
     weight_tools.register()
     organization.register()
     export.register()
+    island_flatten.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -456,9 +491,13 @@ def register():
         options={'TEXTEDIT_UPDATE'},
     )
 
+    _tool_desc_map = {entry[0]: entry[2] for entry in _TOOL_REGISTRY}
     for tool_id in _OPEN_TOOL_IDS:
         setattr(bpy.types.Scene, f'arantools_open_{tool_id}',
-                bpy.props.BoolProperty(default=False))
+                bpy.props.BoolProperty(
+                    default=False,
+                    description=_tool_desc_map[tool_id],
+                ))
 
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -471,6 +510,7 @@ def unregister():
         delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    island_flatten.unregister()
     export.unregister()
     organization.unregister()
     weight_tools.unregister()
