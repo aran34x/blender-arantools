@@ -24,6 +24,7 @@ A Blender addon collection for character rigging, weight painting, organization,
 - [Organization](#organization)
   - [Batch Rig Transfer](#batch-rig-transfer)
   - [Collection Baker](#collection-baker)
+  - [Modifier Sync](#modifier-sync)
 - [Export](#export)
   - [ARP Batch Export](#arp-batch-export)
 - [Naming](#naming)
@@ -278,6 +279,42 @@ Duplicates all meshes in a source collection, applies all their modifiers ("Conv
 1. Set **Source Collection** and **Target Collection**.
 2. For each mesh in the source list, optionally type a **Target Name**. Meshes sharing the same Target Name will be joined together. Meshes with no Target Name keep their own name.
 3. Click **Bake & Join**.
+
+---
+
+### Modifier Sync
+
+Save the modifier stack of one object, choose which modifiers to include, and push them to any number of other objects. Values are updated in-place on modifiers that already exist; missing modifiers are added automatically. The relative order of synced modifiers is preserved.
+
+**Typical use-case:** You have a "master" mesh with a final set of modifiers (e.g. Solidify + Weighted Normal + Shrinkwrap) and want every other piece of clothing or geometry to share the same setup.
+
+**Workflow:**
+
+**Step 1 — Save the stack**
+
+1. Pick the **Source Object** from the dropdown.
+2. Click **Save Stack** — every modifier on that object appears as a row with a checkbox.
+
+**Step 2 — Choose what to copy**
+
+- Tick or untick each modifier row. Only checked modifiers will be copied.
+
+**Step 3 — Copy to selected objects**
+
+1. Select the target objects in the viewport (the source object itself is skipped automatically).
+2. Click **Copy to Selected** (the tall button).
+
+Per target object:
+- **Modifier with the same name already exists** → its property values are updated in-place. The modifier stays at its current position in the target stack.
+- **Modifier does not exist** → it is added as a new modifier. Blender places new modifiers at the bottom of the stack; the tool then reorders all synced modifiers so they appear in the **same relative order as on the source** (while leaving any non-synced modifiers where they are).
+
+The target selection is saved automatically after every copy.
+
+**Step 4 — Reapply to last selection**
+
+After clicking Copy to Selected once, the panel shows a **Last selection** box listing every target object (with an error icon if any were deleted from the scene). Click **Reapply to Last Selection** to push the current checkbox state and values to those exact objects again — useful after tweaking a modifier on the source without needing to re-select everything.
+
+> **Note:** Property copying works by iterating the modifier's RNA properties. Most built-in modifier properties (floats, ints, bools, enums, object/mesh references) are copied correctly. A small number of read-only or internal Blender properties are intentionally skipped (`rna_type`, `type`, `name`, `is_active`, `show_expanded`).
 
 ---
 

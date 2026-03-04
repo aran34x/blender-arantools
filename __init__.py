@@ -18,6 +18,7 @@ from . import weight_tools
 from . import organization
 from . import export
 from . import island_flatten
+from . import modifier_sync
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -77,6 +78,7 @@ _TOOL_REGISTRY = [
     ('contact_flood',  'Contact Weight Flooder', 'Flood vertex weights based on proximity or UV contact with a source object',      'WEIGHT',       'PARTICLE_POINT',     '_draw_t_contact_flood',  False),
     ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig',      False),
     ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
+    ('mod_sync',       'Modifier Sync',          'Save a modifier stack from one object and copy or sync it to other objects',       'ORGANIZATION', 'MODIFIER',           '_draw_t_mod_sync',       False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
     ('seq_namer',      'Object Sequence Namer',  'Name selected objects as a numbered sequence (e.g. Monkey_01, Monkey_02), filling gaps and respecting existing names', 'NAMING', 'LINENUMBERS_ON', '_draw_t_seq_namer', False),
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
@@ -402,6 +404,57 @@ class ARANTOOLS_PT_main(Panel):
         row.operator("arantools.arp_anim_export",  text="Animations",    icon='ANIM')
         layout.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
+    def _draw_t_mod_sync(self, layout, context):
+        props = context.scene.arantools_mod_sync
+        col   = layout.column(align=True)
+
+        # ── Source object ──────────────────────────────────────────────────
+        col.label(text="Source Object:", icon='OBJECT_DATA')
+        row = col.row(align=True)
+        row.prop(props, "source_object", text="")
+        row.operator("arantools.modsync_save_stack",
+                     text="Save Stack", icon='IMPORT')
+        col.separator()
+
+        # ── Modifier checklist ─────────────────────────────────────────────
+        if props.modifier_items:
+            col.label(text="Modifiers to Copy:", icon='MODIFIER')
+            mod_box = col.box()
+            mod_col = mod_box.column(align=True)
+            for item in props.modifier_items:
+                row = mod_col.row(align=True)
+                row.prop(item, "enabled", text="")
+                row.label(text=item.mod_name, icon='MODIFIER_DATA')
+                row.label(text=item.mod_type)
+            col.separator()
+            copy_row = col.row(align=True)
+            copy_row.scale_y = 1.3
+            copy_row.operator("arantools.modsync_copy_to_selected",
+                              icon='COPYDOWN')
+        else:
+            col.label(text="Pick a source object, then Save Stack.", icon='INFO')
+
+        col.separator()
+
+        # ── Last targets / reapply ─────────────────────────────────────────
+        if props.last_targets:
+            col.label(
+                text=f"Last selection  ({len(props.last_targets)} object(s)):",
+                icon='RESTRICT_SELECT_OFF',
+            )
+            tgt_box = col.box()
+            tgt_col = tgt_box.column(align=True)
+            for entry in props.last_targets:
+                exists = bpy.data.objects.get(entry.obj_name) is not None
+                tgt_col.label(
+                    text=entry.obj_name,
+                    icon='OBJECT_DATA' if exists else 'ERROR',
+                )
+            col.separator()
+            col.operator("arantools.modsync_reapply_last", icon='FILE_REFRESH')
+        else:
+            col.label(text="No previous selection saved.", icon='INFO')
+
     def _draw_t_seq_namer(self, layout, context):
         props = context.scene.arantools_seq_namer
         col = layout.column(align=True)
@@ -544,6 +597,7 @@ def register():
     organization.register()
     export.register()
     island_flatten.register()
+    modifier_sync.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -583,6 +637,7 @@ def unregister():
         delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    modifier_sync.unregister()
     island_flatten.unregister()
     export.unregister()
     organization.unregister()
