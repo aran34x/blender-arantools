@@ -17,6 +17,7 @@ A Blender addon collection for character rigging, weight painting, organization,
 - [Weight Tools](#weight-tools)
   - [Smart Weight Transfer](#smart-weight-transfer)
   - [Sync Vertex Groups](#sync-vertex-groups)
+  - [Flatten Island Weights](#flatten-island-weights)
   - [Unify Island Weights](#unify-island-weights)
   - [Island Weight Copy](#island-weight-copy)
   - [Contact Weight Flooder](#contact-weight-flooder)
@@ -165,6 +166,27 @@ Adds empty vertex groups to the active mesh for any deform bones in its armature
 
 ---
 
+### Flatten Island Weights
+
+For each disconnected mesh island, averages all deform-bone weights across every vertex in that island. The result is that every vertex in the island has identical weights — making the piece bend rigidly as a unit rather than deforming internally.
+
+Designed for assets like feathers, scales, or armor plates where internal deformation is undesirable.
+
+**Properties:**
+
+| Property                    | Description                                                              |
+| --------------------------- | ------------------------------------------------------------------------ |
+| **Blend**                   | `0` = no change, `1` = fully averaged weights per island                 |
+| **Selected Vertices Only**  | Restrict the operation to vertices selected in Edit Mode                 |
+
+**How to use:**
+
+1. Select a mesh that is bound to an armature via an Armature modifier.
+2. Adjust the **Blend** factor.
+3. Click **Flatten Island Weights**.
+
+---
+
 ### Unify Island Weights
 
 For each disconnected mesh island, finds the bone with the highest total influence across that island and assigns the entire island 100% to that bone. Useful for cleaning up automatic weights on assets like feathers or scales where each piece should follow exactly one bone.
@@ -263,7 +285,7 @@ Duplicates all meshes in a source collection, applies all their modifiers ("Conv
 
 ### ARP Batch Export
 
-Batch-exports selected meshes as individual FBX files using Auto-Rig Pro's export operator, with flexible filename control.
+Batch-exports meshes or animations as FBX files using Auto-Rig Pro, with flexible filename control. The panel provides two export buttons for separate workflows.
 
 **Properties:**
 
@@ -276,12 +298,35 @@ Batch-exports selected meshes as individual FBX files using Auto-Rig Pro's expor
 
 A **live filename preview** shows the original and final name for the first selected mesh.
 
+---
+
+#### Export Meshes
+
+Exports each selected mesh as a separate FBX file alongside the armature.
+
+Automatically sets **Selected Objects Only = On** and **Bake Animations = Off** in the ARP exporter before running, then restores original settings afterward.
+
 **How to use:**
 
 1. Set the **Armature** and **Export Folder**.
 2. Configure naming rules.
 3. Select the meshes to export in the viewport.
-4. Click **Batch Export Rigged Meshes**.
+4. Click **Export Meshes**.
+
+---
+
+#### Export Animations
+
+Exports all actions for the armature as individual FBX files into an `Animations/` subfolder inside the export folder.
+
+Automatically sets **Selected Objects Only = On**, **Bake Animations = On**, **As Multiple FBX = On**, and **Only Active Action = Off** before running, then restores original settings afterward. Only the armature is selected during export — mesh objects are deselected.
+
+**How to use:**
+
+1. Set the **Armature** and **Export Folder**.
+2. Click **Export Animations**.
+
+All actions present in the file are exported, each as a separate FBX named after the action.
 
 **Requirements:** Auto-Rig Pro.
 
@@ -355,25 +400,57 @@ A **live preview** below the fields shows the exact name that will be applied be
 
 ### Noise on Bones
 
-Adds procedural noise to bone F-curves using Blender's built-in NOISE FCurve modifier. Operates on all selected pose bones.
+Adds procedural noise to bone F-curves using Blender's built-in NOISE FCurve modifier. Operates on all selected pose bones. The noise is named `Aran_Noise` so re-applying always updates the same modifier rather than stacking new ones.
 
-**Properties:**
+**Timing:**
 
-| Property           | Description                                          |
-| ------------------ | ---------------------------------------------------- |
-| **Rot Strength**   | Amplitude of the rotation noise                      |
-| **Rot Speed**      | Frequency of the rotation noise                      |
-| **Loc Strength**   | Amplitude of the location noise                      |
-| **Loc Speed**      | Frequency of the location noise                      |
-| **Frame Length**   | Total frame range the noise is restricted to         |
-| **Blend Duration** | Number of frames to fade in/out at the start and end |
+| Property         | Description                                          |
+| ---------------- | ---------------------------------------------------- |
+| **Last Frame**   | Frame at which the noise fades out completely        |
+| **Blend In/Out** | Number of frames to fade in at frame 0 and out at Last Frame |
+
+**Rotation:**
+
+| Property             | Description                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| **Strength**         | Overall amplitude of the rotation noise                             |
+| **Time Scale**       | Noise pattern scale. Higher = slower, broader oscillation. Lower = faster, tighter oscillation |
+
+**Location:**
+
+| Property             | Description                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| **Strength**         | Overall amplitude of the location noise (divided by 100 internally to keep values human-friendly) |
+| **Time Scale**       | Noise pattern scale. Higher = slower, broader oscillation. Lower = faster, tighter oscillation |
+
+**Advanced (collapsible):**
+
+Per-axis controls and divisors for fine-tuning.
+
+| Property                    | Description                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| **Rot Strength X / Y / Z**  | Per-axis strength multiplier for rotation. `1.0` = full, `0.0` = silenced  |
+| **Rot Scale X / Y / Z**     | Per-axis time scale multiplier for rotation. Above `1.0` slows axis down    |
+| **Loc Strength X / Y / Z**  | Per-axis strength multiplier for location. `1.0` = full, `0.0` = silenced  |
+| **Loc Scale X / Y / Z**     | Per-axis time scale multiplier for location. Above `1.0` slows axis down    |
+| **Loc Strength ÷**          | Location strength is divided by this value before reaching the modifier (default 100) |
+| **Scale ÷**                 | The Time Scale value is divided by this before reaching the modifier (default 2) |
+
+**Apply buttons:**
+
+| Button           | What it does                                               |
+| ---------------- | ---------------------------------------------------------- |
+| **Rotation**     | Adds/updates noise on rotation channels only               |
+| **Location**     | Adds/updates noise on location channels only               |
+| **Both**         | Adds/updates noise on both rotation and location at once   |
+| **Remove Noise** | Strips all `Aran_Noise` modifiers from selected bone F-curves |
+
+Each click re-applies the modifier with a new random phase offset, so clicking again randomises the pattern.
 
 **How to use:**
 
 1. In Pose Mode, select the bones you want to affect.
-2. Adjust the settings.
-3. Click **Rotation** to add noise to rotation channels, **Location** for location channels, or both.
-
-Each click re-applies the modifier with new random phase offsets, so clicking again randomises the pattern.
+2. Set the timing and strength values.
+3. Click **Rotation**, **Location**, or **Both** to apply.
 
 **Requirements:** The armature must have an active Action with existing F-curves on the target bones. Noise is added on top of existing keyframe animation.

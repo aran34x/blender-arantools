@@ -449,18 +449,80 @@ class ARANTOOLS_PT_main(Panel):
 
     def _draw_t_noise_bones(self, layout, context):
         scene = context.scene
-        col = layout.column(align=True)
-        col.prop(scene, 'arantools_rotation_strength', text='Rot Strength', slider=True)
-        col.prop(scene, 'arantools_rotation_scale', text='Rot Speed', slider=True)
-        col.prop(scene, 'arantools_location_strenght', text='Loc Strength', slider=True)
-        col.prop(scene, 'arantools_location_scale', text='Loc Speed', slider=True)
+        col   = layout.column(align=True)
+
+        # ── Timing ────────────────────────────────────────────────────────
+        col.label(text="Timing:", icon='TIME')
+        col.prop(scene, 'arantools_frame_length',   text='Last Frame')
+        col.prop(scene, 'arantools_blend_duration', text='Blend In/Out')
         col.separator()
-        col.prop(scene, 'arantools_frame_length', text='Frame Length')
-        col.prop(scene, 'arantools_blend_duration', text='Blend Duration')
+
+        # ── Rotation ──────────────────────────────────────────────────────
+        col.label(text="Rotation:", icon='ORIENTATION_GIMBAL')
+        col.prop(scene, 'arantools_rotation_strength', text='Strength', slider=True)
+        col.prop(scene, 'arantools_rotation_scale',
+                 text='Time Scale  (↑ = slower)', slider=True)
         col.separator()
-        row = col.row(align=True)
-        row.operator("arantools.apply_noise_rotation", text='Rotation', icon='FORCE_FORCE')
-        row.operator("arantools.apply_noise_location", text='Location', icon='FORCE_FORCE')
+
+        # ── Location ──────────────────────────────────────────────────────
+        col.label(text="Location:", icon='OBJECT_ORIGIN')
+        col.prop(scene, 'arantools_location_strenght', text='Strength', slider=True)
+        col.prop(scene, 'arantools_location_scale',
+                 text='Time Scale  (↑ = slower)', slider=True)
+        col.separator()
+
+        # ── Advanced ──────────────────────────────────────────────────────
+        adv_box = col.box()
+        adv_row = adv_box.row(align=True)
+        adv_row.prop(scene, 'arantools_advanced_options',
+                     icon='TRIA_DOWN' if scene.arantools_advanced_options else 'TRIA_RIGHT',
+                     emboss=False, text="Advanced")
+
+        if scene.arantools_advanced_options:
+            sub = adv_box.column(align=True)
+
+            # ── Rotation per-axis ──────────────────────────────────────
+            sub.label(text="Rotation Axis:", icon='ORIENTATION_GIMBAL')
+            row = sub.row(align=True)
+            row.label(text="Strength")
+            row.prop(scene, 'arantools_rotation_axis_multipliers',
+                     text='', slider=True)
+            row = sub.row(align=True)
+            row.label(text="Scale")
+            row.prop(scene, 'arantools_rotation_axis_multiplier_speed',
+                     text='', slider=True)
+            sub.separator()
+
+            # ── Location per-axis ──────────────────────────────────────
+            sub.label(text="Location Axis:", icon='OBJECT_ORIGIN')
+            row = sub.row(align=True)
+            row.label(text="Strength")
+            row.prop(scene, 'arantools_location_axis_multipliers',
+                     text='', slider=True)
+            row = sub.row(align=True)
+            row.label(text="Scale")
+            row.prop(scene, 'arantools_location_axis_multiplier_speed',
+                     text='', slider=True)
+            sub.separator()
+
+            # ── Divisors ───────────────────────────────────────────────
+            sub.label(text="Divisors:", icon='DRIVER_TRANSFORM')
+            sub.prop(scene, 'arantools_location_strength_divisor',
+                     text='Loc Strength ÷')
+            sub.prop(scene, 'arantools_scale_divisor',
+                     text='Scale ÷')
+
+        col.separator()
+
+        # ── Apply ─────────────────────────────────────────────────────────
+        col.label(text="Apply:", icon='FORCE_TURBULENCE')
+        apply_row = col.row(align=True)
+        apply_row.scale_y = 1.3
+        apply_row.operator("arantools.apply_noise_rotation", icon='ORIENTATION_GIMBAL')
+        apply_row.operator("arantools.apply_noise_location", icon='OBJECT_ORIGIN')
+        apply_row.operator("arantools.apply_noise_both",     icon='FORCE_TURBULENCE')
+        col.separator()
+        col.operator("arantools.remove_noise", icon='X')
 
 
 # ============================================================================
