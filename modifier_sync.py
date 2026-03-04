@@ -337,6 +337,23 @@ class ARANTOOLS_OT_ModSync_Reapply(Operator):
 
 
 # ============================================================================
+# Mode-setter operator (drives the Merge / Replace toggle in the UI)
+# ============================================================================
+
+class ARANTOOLS_OT_ModSync_SetMode(Operator):
+    """Switch between Merge and Replace All copy modes"""
+    bl_idname  = "arantools.modsync_set_mode"
+    bl_label   = "Set Mode"
+    bl_options = {'INTERNAL'}
+
+    replace: bpy.props.BoolProperty()
+
+    def execute(self, context):
+        context.scene.arantools_mod_sync.replace_all = self.replace
+        return {'FINISHED'}
+
+
+# ============================================================================
 # Registration
 # ============================================================================
 
@@ -345,6 +362,7 @@ classes = [
     ARANTOOLS_PG_SavedObjName,
     ARANTOOLS_PG_ModSync,
     ARANTOOLS_OT_ModSync_SaveStack,
+    ARANTOOLS_OT_ModSync_SetMode,
     ARANTOOLS_OT_ModSync_CopyToSelected,
     ARANTOOLS_OT_ModSync_Reapply,
 ]

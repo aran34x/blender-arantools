@@ -427,35 +427,55 @@ class ARANTOOLS_PT_main(Panel):
                 row.label(text=item.mod_name, icon='MODIFIER_DATA')
                 row.label(text=item.mod_type)
             col.separator()
-            col.prop(props, "replace_all", icon='TRASH')
+
+            # Mode — two side-by-side buttons; depress=True highlights the
+            # active one so it reads like a radio selector, not an action
+            mode_row = col.row(align=True)
+            mode_row.label(text="Mode:")
+            op = mode_row.operator("arantools.modsync_set_mode",
+                                   text="Merge",   icon='MODIFIER',
+                                   depress=not props.replace_all)
+            op.replace = False
+            op = mode_row.operator("arantools.modsync_set_mode",
+                                   text="Replace", icon='TRASH',
+                                   depress=props.replace_all)
+            op.replace = True
+
             col.separator()
             copy_row = col.row(align=True)
             copy_row.scale_y = 1.3
-            copy_row.operator("arantools.modsync_copy_to_selected",
-                              icon='COPYDOWN')
+            if props.replace_all:
+                copy_row.operator("arantools.modsync_copy_to_selected",
+                                  text="Replace on Selected", icon='TRASH')
+            else:
+                copy_row.operator("arantools.modsync_copy_to_selected",
+                                  text="Copy to Selected", icon='COPYDOWN')
         else:
             col.label(text="Pick a source object, then Save Stack.", icon='INFO')
 
         col.separator()
 
         # ── Last targets / reapply ─────────────────────────────────────────
-        if props.last_targets:
-            col.label(
-                text=f"Last selection  ({len(props.last_targets)} object(s)):",
-                icon='RESTRICT_SELECT_OFF',
-            )
-            tgt_box = col.box()
-            tgt_col = tgt_box.column(align=True)
-            for entry in props.last_targets:
-                exists = bpy.data.objects.get(entry.obj_name) is not None
-                tgt_col.label(
-                    text=entry.obj_name,
-                    icon='OBJECT_DATA' if exists else 'ERROR',
+        # Only show when a stack is loaded AND targets exist — the button
+        # silently fails without both, so don't show it in a broken state.
+        if props.modifier_items:
+            if props.last_targets:
+                col.label(
+                    text=f"Last selection  ({len(props.last_targets)} object(s)):",
+                    icon='RESTRICT_SELECT_OFF',
                 )
-            col.separator()
-            col.operator("arantools.modsync_reapply_last", icon='FILE_REFRESH')
-        else:
-            col.label(text="No previous selection saved.", icon='INFO')
+                tgt_box = col.box()
+                tgt_col = tgt_box.column(align=True)
+                for entry in props.last_targets:
+                    exists = bpy.data.objects.get(entry.obj_name) is not None
+                    tgt_col.label(
+                        text=entry.obj_name,
+                        icon='OBJECT_DATA' if exists else 'ERROR',
+                    )
+                col.separator()
+                col.operator("arantools.modsync_reapply_last", icon='FILE_REFRESH')
+            else:
+                col.label(text="No previous selection saved.", icon='INFO')
 
     def _draw_t_seq_namer(self, layout, context):
         props = context.scene.arantools_seq_namer
