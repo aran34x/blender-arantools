@@ -428,19 +428,7 @@ class ARANTOOLS_PT_main(Panel):
                 row.label(text=item.mod_type)
             col.separator()
 
-            # Mode — two side-by-side buttons; depress=True highlights the
-            # active one so it reads like a radio selector, not an action
-            mode_row = col.row(align=True)
-            mode_row.label(text="Mode:")
-            op = mode_row.operator("arantools.modsync_set_mode",
-                                   text="Merge",   icon='MODIFIER',
-                                   depress=not props.replace_all)
-            op.replace = False
-            op = mode_row.operator("arantools.modsync_set_mode",
-                                   text="Replace", icon='TRASH',
-                                   depress=props.replace_all)
-            op.replace = True
-
+            col.prop(props, "replace_all")
             col.separator()
             copy_row = col.row(align=True)
             copy_row.scale_y = 1.3
