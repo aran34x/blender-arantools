@@ -26,6 +26,7 @@ A Blender addon collection for character rigging, weight painting, organization,
 - [Export](#export)
   - [ARP Batch Export](#arp-batch-export)
 - [Naming](#naming)
+  - [Object Sequence Namer](#object-sequence-namer)
   - [Bone Renamer](#bone-renamer)
 - [Animation](#animation)
   - [Noise on Bones](#noise-on-bones)
@@ -287,6 +288,43 @@ A **live filename preview** shows the original and final name for the first sele
 ---
 
 ## Naming
+
+### Object Sequence Namer
+
+Renames selected objects into a numbered sequence such as `Monkey_01`, `Monkey_02`, `Monkey_03`. Respects objects that are already correctly named — only unmatched objects receive new numbers, with gaps in the existing sequence filled first.
+
+**Properties:**
+
+| Property            | Description                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Base Name**       | Root part of the name (e.g. `Monkey` → `Monkey_01`)                                                               |
+| **Digits**          | How many digits to pad the index with. `2` → `_01`, `3` → `_001`                                                  |
+| **Replace Existing**| When **off** (default): objects that already match `BaseName_NN` keep their number; only unmatched objects are renamed. When **on**: every selected object is renumbered from scratch (matched objects sorted by current number first, then unmatched objects) |
+
+**Default behaviour (Replace Existing OFF):**
+
+1. The entire scene is scanned for objects already named `BaseName_NN`.
+2. Their numbers are reserved — nothing will be assigned those slots.
+3. Unmatched selected objects receive the lowest available numbers, filling any gaps before extending the sequence.
+
+**Example — gap filling:**
+
+| Before                            | After (2 new objects added)          |
+| --------------------------------- | ------------------------------------ |
+| `Monkey_01`, `Monkey_03` (scene)  | `Monkey_01`, `Monkey_02` ← new, `Monkey_03`, `Monkey_04` ← new |
+| `Cube`, `Sphere` (selected)       | gaps filled before extending sequence |
+
+**How to use:**
+
+1. Type a **Base Name** (e.g. `Monkey`).
+2. Select all objects you want to number in the viewport.
+3. Click **Apply Sequence Names**.
+
+Already-named objects are untouched unless **Replace Existing** is checked.
+
+> **Note:** Blender name conflicts (`.001` suffixes) are avoided automatically by using temporary names during the rename step.
+
+---
 
 ### Bone Renamer
 

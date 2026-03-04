@@ -1,5 +1,138 @@
 import bpy
+import re
 from bpy.types import Operator, Panel
+
+
+# ============================================================================
+# Object Sequence Namer
+# ============================================================================
+
+class ARANTOOLS_PG_SeqNamer(bpy.types.PropertyGroup):
+    base_name: bpy.props.StringProperty(
+        name="Base Name",
+        description=(
+            "Root name for the numbered sequence.\n"
+            "e.g. 'Monkey' produces 'Monkey_01', 'Monkey_02', …"
+        ),
+        default="Object",
+    )
+    padding: bpy.props.IntProperty(
+        name="Digits",
+        description=(
+            "How many digits to use for the index.\n"
+            "2 → '_01'   3 → '_001'"
+        ),
+        default=2,
+        min=1,
+        max=6,
+    )
+    replace_existing: bpy.props.BoolProperty(
+        name="Replace Existing",
+        description=(
+            "When OFF: objects that already match 'BaseName_NN' keep their number — "
+            "only un-named objects are assigned new numbers (filling gaps first).\n"
+            "When ON: every selected object is renumbered from scratch regardless of "
+            "its current name. Matched objects are sorted by their current number "
+            "before renaming so their relative order is preserved."
+        ),
+        default=False,
+    )
+
+
+class ARANTOOLS_OT_SequenceNameObjects(Operator):
+    """Name selected objects as a numbered sequence.
+
+Respects existing names: objects already called BaseName_NN keep their
+number (gaps in the sequence are filled first with un-named objects).
+Enable 'Replace Existing' to renumber everything from scratch."""
+    bl_idname = "arantools.sequence_name_objects"
+    bl_label = "Apply Sequence Names"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props   = context.scene.arantools_seq_namer
+        base    = props.base_name.strip()
+        padding = props.padding
+        replace = props.replace_existing
+
+        if not base:
+            self.report({'ERROR'}, "Base Name cannot be empty.")
+            return {'CANCELLED'}
+
+        selected = list(context.selected_objects)
+        if not selected:
+            self.report({'WARNING'}, "No objects selected.")
+            return {'CANCELLED'}
+
+        # Regex: exactly  <base>_<digits>  and nothing else
+        pattern = re.compile(r'^' + re.escape(base) + r'_(\d+)$')
+
+        # ── Scene-wide existing assignments ──────────────────────────────────
+        # Maps  number (int) → object  for every object in the scene
+        scene_matches = {}
+        for obj in context.scene.objects:
+            m = pattern.match(obj.name)
+            if m:
+                scene_matches[int(m.group(1))] = obj
+
+        # ── Classify selected objects ────────────────────────────────────────
+        matched_selected   = {}   # int → object  (already named correctly)
+        unmatched_selected = []   # objects with non-conforming names
+
+        for obj in selected:
+            m = pattern.match(obj.name)
+            if m:
+                matched_selected[int(m.group(1))] = obj
+            else:
+                unmatched_selected.append(obj)
+
+        # ── Build the ordered list of objects to rename ──────────────────────
+        if replace:
+            # Renumber everyone; matched ones go first sorted by current number
+            all_to_rename = (
+                [obj for _, obj in sorted(matched_selected.items())]
+                + unmatched_selected
+            )
+            # Numbers held only by objects outside the selection block new slots
+            taken_nums = {
+                num for num, obj in scene_matches.items()
+                if obj not in selected
+            }
+        else:
+            # Only rename objects without a conforming name
+            all_to_rename = unmatched_selected
+            # All scene matches block number slots (including selected ones that
+            # are already correctly named — we must not steal their numbers)
+            taken_nums = set(scene_matches.keys())
+
+        if not all_to_rename:
+            self.report(
+                {'INFO'},
+                "Nothing to rename — all selected objects are already in the sequence."
+            )
+            return {'FINISHED'}
+
+        # ── Find available numbers (fill gaps, then extend) ──────────────────
+        available = []
+        n = 1
+        while len(available) < len(all_to_rename):
+            if n not in taken_nums:
+                available.append(n)
+            n += 1
+
+        # ── Apply names via temp names to avoid Blender's ".001" conflict ────
+        TEMP = "__ARANTOOLS_SEQTMP_"
+        for i, obj in enumerate(all_to_rename):
+            obj.name = f"{TEMP}{i}"
+
+        for obj, num in zip(all_to_rename, available):
+            obj.name = f"{base}_{str(num).zfill(padding)}"
+
+        self.report(
+            {'INFO'},
+            f"Renamed {len(all_to_rename)} object(s) → '{base}_NN' sequence."
+        )
+        return {'FINISHED'}
 
 
 # ============================================================================
@@ -56,6 +189,8 @@ class ARANTOOLS_OT_Rename_Bone(Operator):
 # ============================================================================
 
 classes = [
+    ARANTOOLS_PG_SeqNamer,
+    ARANTOOLS_OT_SequenceNameObjects,
     ARANTOOLS_OT_Reset_Counter,
     ARANTOOLS_OT_Rename_Bone,
 ]
@@ -64,6 +199,10 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+
+    bpy.types.Scene.arantools_seq_namer = bpy.props.PointerProperty(
+        type=ARANTOOLS_PG_SeqNamer
+    )
 
     # Scene properties
     bpy.types.Scene.arantools_format = bpy.props.StringProperty(
@@ -89,6 +228,7 @@ def register():
 
 
 def unregister():
+    del bpy.types.Scene.arantools_seq_namer
     del bpy.types.Scene.arantools_inc
     del bpy.types.Scene.arantools_t4
     del bpy.types.Scene.arantools_t3

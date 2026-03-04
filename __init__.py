@@ -78,6 +78,7 @@ _TOOL_REGISTRY = [
     ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig',      False),
     ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
+    ('seq_namer',      'Object Sequence Namer',  'Name selected objects as a numbered sequence (e.g. Monkey_01, Monkey_02), filling gaps and respecting existing names', 'NAMING', 'LINENUMBERS_ON', '_draw_t_seq_namer', False),
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
 ]
@@ -273,7 +274,6 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "only_selected")
         col.separator()
         col.operator("arantools.island_flatten_weights", icon='MOD_SMOOTH')
-        col.label(text="Requires Auto-Rig Pro", icon='ERROR')
 
     def _draw_t_smart_transfer(self, layout, context):
         props = context.scene.arantools_smart_transfer
@@ -401,6 +401,17 @@ class ARANTOOLS_PT_main(Panel):
         row.operator("arantools.arp_batch_export", text="Export Meshes", icon='EXPORT')
         row.operator("arantools.arp_anim_export",  text="Animations",    icon='ANIM')
         layout.label(text="Requires Auto-Rig Pro", icon='ERROR')
+
+    def _draw_t_seq_namer(self, layout, context):
+        props = context.scene.arantools_seq_namer
+        col = layout.column(align=True)
+        col.prop(props, "base_name", text="Base Name")
+        row = col.row(align=True)
+        row.prop(props, "padding", text="Digits")
+        col.separator()
+        col.prop(props, "replace_existing")
+        col.separator()
+        col.operator("arantools.sequence_name_objects", icon='LINENUMBERS_ON')
 
     def _draw_t_bone_renamer(self, layout, context):
         scene = context.scene
