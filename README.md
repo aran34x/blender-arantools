@@ -284,9 +284,9 @@ Duplicates all meshes in a source collection, applies all their modifiers ("Conv
 
 ### Modifier Sync
 
-Save the modifier stack of one object, choose which modifiers to include, and push them to any number of other objects. Values are updated in-place on modifiers that already exist; missing modifiers are added automatically. The relative order of synced modifiers is preserved.
+Save the modifier stack of one object, choose which modifiers to include, and push them to any number of other objects. Values are updated on modifiers that already exist; missing modifiers are added automatically. Geometry Nodes socket values are fully copied. The relative order of synced modifiers is preserved.
 
-**Typical use-case:** You have a "master" mesh with a final set of modifiers (e.g. Solidify + Weighted Normal + Shrinkwrap) and want every other piece of clothing or geometry to share the same setup.
+**Typical use-case:** You have a "master" mesh with a final set of modifiers (e.g. Solidify + Weighted Normal + Shrinkwrap + a Geometry Nodes setup) and want every other piece of clothing or geometry to share the same setup.
 
 **Workflow:**
 
@@ -297,24 +297,31 @@ Save the modifier stack of one object, choose which modifiers to include, and pu
 
 **Step 2 — Choose what to copy**
 
-- Tick or untick each modifier row. Only checked modifiers will be copied.
+Tick or untick each modifier row. Only checked modifiers will be copied.
 
-**Step 3 — Copy to selected objects**
+**Step 3 — Set copy mode**
 
-1. Select the target objects in the viewport (the source object itself is skipped automatically).
-2. Click **Copy to Selected** (the tall button).
+| Option | Behaviour |
+| --- | --- |
+| **Replace All Modifiers OFF** (default) | Merge into the target's existing stack. Modifiers with the same name have their values updated in-place; missing ones are added. Unrelated modifiers already on the target are left untouched. Synced modifiers are reordered to match source order relative to each other. |
+| **Replace All Modifiers ON** | Every existing modifier is removed from each target object first, then the checked modifiers are added fresh in source order. The target ends up with exactly the checked set. |
 
-Per target object:
-- **Modifier with the same name already exists** → its property values are updated in-place. The modifier stays at its current position in the target stack.
-- **Modifier does not exist** → it is added as a new modifier. Blender places new modifiers at the bottom of the stack; the tool then reorders all synced modifiers so they appear in the **same relative order as on the source** (while leaving any non-synced modifiers where they are).
+**Step 4 — Copy to selected objects**
 
-The target selection is saved automatically after every copy.
+1. Select the target objects in the viewport (the source object itself is always skipped).
+2. Click **Copy to Selected**.
 
-**Step 4 — Reapply to last selection**
+The target selection is saved automatically.
 
-After clicking Copy to Selected once, the panel shows a **Last selection** box listing every target object (with an error icon if any were deleted from the scene). Click **Reapply to Last Selection** to push the current checkbox state and values to those exact objects again — useful after tweaking a modifier on the source without needing to re-select everything.
+**Step 5 — Reapply to last selection**
 
-> **Note:** Property copying works by iterating the modifier's RNA properties. Most built-in modifier properties (floats, ints, bools, enums, object/mesh references) are copied correctly. A small number of read-only or internal Blender properties are intentionally skipped (`rna_type`, `type`, `name`, `is_active`, `show_expanded`).
+After copying once, the panel shows a **Last selection** box listing every target object (error icon if any were deleted from the scene). Click **Reapply to Last Selection** to push the current checkbox state, mode, and values to those exact objects again — useful after tweaking modifiers on the source without needing to re-select.
+
+**Geometry Nodes support**
+
+Geometry Nodes socket input values are stored separately from the regular modifier properties in Blender and are not exposed through the standard RNA property list. The tool handles this with a dedicated copy pass that reads socket identifiers from the node group's interface tree and copies each value directly. This covers all input types: numbers, vectors, booleans, colors, and object/collection/material references.
+
+> **Note:** A small set of read-only or type-level properties are intentionally skipped during copying: `rna_type`, `type`, `name`, `is_active`, `show_expanded`.
 
 ---
 

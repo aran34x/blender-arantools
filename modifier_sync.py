@@ -12,11 +12,56 @@ _SKIP_PROPS = frozenset({
 })
 
 
+def _copy_geonodes_inputs(src_mod, dst_mod):
+    """Copy Geometry Nodes socket input values between two NODES modifiers.
+
+    In Blender 4.0+ socket values live on the modifier as keyed properties
+    (modifier["Socket_X"] = value). We read the identifiers from the node
+    group's interface tree so we only touch real input sockets.
+
+    Falls back to the older ng.inputs API for Blender 3.x.
+    """
+    if src_mod.type != 'NODES' or not src_mod.node_group:
+        return
+    if not dst_mod.node_group:
+        return  # node_group wasn't copied (different type?), nothing to do
+
+    ng = src_mod.node_group
+
+    # ── Blender 4.0+ path ─────────────────────────────────────────────────
+    if hasattr(ng, 'interface'):
+        try:
+            for item in ng.interface.items_tree:
+                if getattr(item, 'in_out', None) == 'INPUT':
+                    ident = item.identifier
+                    try:
+                        dst_mod[ident] = src_mod[ident]
+                    except (KeyError, TypeError):
+                        pass
+        except Exception:
+            pass
+        return
+
+    # ── Blender 3.x fallback ──────────────────────────────────────────────
+    try:
+        for inp in ng.inputs:
+            ident = inp.identifier
+            try:
+                dst_mod[ident] = src_mod[ident]
+            except (KeyError, TypeError):
+                pass
+    except Exception:
+        pass
+
+
 def _copy_mod_props(src_mod, dst_mod):
-    """Copy all non-read-only RNA properties from src_mod to dst_mod.
+    """Copy all non-read-only RNA properties from src_mod to dst_mod,
+    then copy Geometry Nodes socket values if applicable.
     Both must be the same modifier type."""
     if src_mod.type != dst_mod.type:
         return
+
+    # ── Standard RNA properties ────────────────────────────────────────────
     for prop in src_mod.bl_rna.properties:
         ident = prop.identifier
         if ident in _SKIP_PROPS:
@@ -28,6 +73,9 @@ def _copy_mod_props(src_mod, dst_mod):
             setattr(dst_mod, ident, val)
         except Exception:
             pass
+
+    # ── Geometry Nodes socket values (not exposed via bl_rna) ─────────────
+    _copy_geonodes_inputs(src_mod, dst_mod)
 
 
 # ============================================================================
@@ -58,6 +106,17 @@ class ARANTOOLS_PG_ModSync(bpy.types.PropertyGroup):
     )
     modifier_items: bpy.props.CollectionProperty(type=ARANTOOLS_PG_ModItem)
     last_targets:   bpy.props.CollectionProperty(type=ARANTOOLS_PG_SavedObjName)
+    replace_all: bpy.props.BoolProperty(
+        name="Replace All Modifiers",
+        description=(
+            "When ON: remove every existing modifier from each target object "
+            "before adding the checked ones (target ends up with only the "
+            "checked modifiers, in source order).\n"
+            "When OFF: update existing mods in-place and add any that are "
+            "missing, leaving unrelated mods untouched"
+        ),
+        default=False,
+    )
 
 
 # ============================================================================
@@ -99,11 +158,16 @@ class ARANTOOLS_OT_ModSync_SaveStack(Operator):
 def _do_copy(context, props, targets):
     """Copy checked modifiers from source to each target object.
 
-    For each target:
-      - If a modifier with the same name already exists → update its values
-        in-place (preserving the modifier's current position in the stack).
-      - If it doesn't exist → add it, then reorder so that all synced
-        modifiers appear in the same relative order as in the source.
+    Replace-all mode (props.replace_all = True):
+      All existing modifiers are removed from the target, then the checked
+      modifiers are added fresh in source order. No reordering step needed.
+
+    Merge mode (props.replace_all = False, default):
+      - Modifier with same name already exists → update values in-place
+        (modifier keeps its current stack position).
+      - Modifier does not exist → add it, then reorder so all synced mods
+        appear in the same relative order as on the source (unchecked mods
+        on the target stay where they are).
 
     Returns (count_succeeded, error_message_or_None).
     """
@@ -113,12 +177,11 @@ def _do_copy(context, props, targets):
     if not props.modifier_items:
         return 0, "No modifier stack saved. Click 'Save Stack' first."
 
-    checked_items    = [item for item in props.modifier_items if item.enabled]
+    checked_items = [item for item in props.modifier_items if item.enabled]
     if not checked_items:
         return 0, "No modifiers are checked."
 
-    checked_names    = [item.mod_name for item in checked_items]
-    checked_name_set = set(checked_names)
+    checked_names = [item.mod_name for item in checked_items]
 
     old_active = context.view_layer.objects.active
     count      = 0
@@ -127,49 +190,59 @@ def _do_copy(context, props, targets):
         if obj is src:
             continue
 
-        # ── Step 1: update existing mods / add missing mods ───────────────
-        for item in checked_items:
-            src_mod = src.modifiers.get(item.mod_name)
-            if src_mod is None:
-                continue  # source mod was removed after Save Stack
-
-            dst_mod = obj.modifiers.get(item.mod_name)
-            if dst_mod is not None:
-                # Already exists → update property values in place
-                if dst_mod.type == src_mod.type:
-                    _copy_mod_props(src_mod, dst_mod)
-            else:
-                # Doesn't exist → add and populate
+        if props.replace_all:
+            # ── Replace mode: wipe target stack, rebuild from checked list ──
+            obj.modifiers.clear()
+            for item in checked_items:
+                src_mod = src.modifiers.get(item.mod_name)
+                if src_mod is None:
+                    continue
                 new_mod = obj.modifiers.new(name=item.mod_name, type=src_mod.type)
                 if new_mod:
                     _copy_mod_props(src_mod, new_mod)
+            # Mods were added in source order → no reordering needed
 
-        # ── Step 2: reorder synced mods to match source order ─────────────
-        # We only adjust relative order among the checked mods; unchecked
-        # (native) mods on the target are left at their current positions.
-        # Algorithm: walk the checked names in source order; if the current
-        # mod sits before the previous one, move it right after it.
-        context.view_layer.objects.active = obj
+        else:
+            # ── Merge mode: update existing, add missing ─────────────────
+            for item in checked_items:
+                src_mod = src.modifiers.get(item.mod_name)
+                if src_mod is None:
+                    continue  # source mod was removed after Save Stack
 
-        prev_name = None
-        for name in checked_names:
-            if name not in obj.modifiers:
-                continue
-            # Re-read stack every iteration because moving changes indices
-            stack   = [m.name for m in obj.modifiers]
-            cur_idx = stack.index(name)
+                dst_mod = obj.modifiers.get(item.mod_name)
+                if dst_mod is not None:
+                    # Exists → update values in-place
+                    if dst_mod.type == src_mod.type:
+                        _copy_mod_props(src_mod, dst_mod)
+                else:
+                    # Missing → add and populate
+                    new_mod = obj.modifiers.new(name=item.mod_name, type=src_mod.type)
+                    if new_mod:
+                        _copy_mod_props(src_mod, new_mod)
 
-            if prev_name is not None and prev_name in stack:
-                prev_idx = stack.index(prev_name)
-                if cur_idx < prev_idx:
-                    # Move this mod to right after prev_name
-                    try:
-                        bpy.ops.object.modifier_move_to_index(
-                            modifier=name, index=prev_idx)
-                    except Exception:
-                        pass
+            # ── Reorder: ensure checked mods appear in source order ────────
+            # Walk checked names in source order; if a mod sits before the
+            # previous one in the target stack, move it right after it.
+            context.view_layer.objects.active = obj
 
-            prev_name = name
+            prev_name = None
+            for name in checked_names:
+                if name not in obj.modifiers:
+                    continue
+                # Re-read stack each pass — moving changes indices
+                stack   = [m.name for m in obj.modifiers]
+                cur_idx = stack.index(name)
+
+                if prev_name is not None and prev_name in stack:
+                    prev_idx = stack.index(prev_name)
+                    if cur_idx < prev_idx:
+                        try:
+                            bpy.ops.object.modifier_move_to_index(
+                                modifier=name, index=prev_idx)
+                        except Exception:
+                            pass
+
+                prev_name = name
 
         count += 1
 
@@ -209,9 +282,10 @@ Saves this selection so you can reapply later"""
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
 
+        mode_label = "replaced" if props.replace_all else "synced"
         self.report(
             {'INFO'},
-            f"Modifiers copied to {count} object(s). Selection saved.",
+            f"Modifiers {mode_label} on {count} object(s). Selection saved.",
         )
         return {'FINISHED'}
 
@@ -254,7 +328,8 @@ class ARANTOOLS_OT_ModSync_Reapply(Operator):
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
 
-        msg = f"Reapplied to {count} object(s)."
+        mode_label = "replaced" if props.replace_all else "synced"
+        msg = f"Modifiers {mode_label} on {count} object(s)."
         if missing:
             msg += f"  ({len(missing)} no longer in scene: {', '.join(missing)})"
         self.report({'INFO'}, msg)

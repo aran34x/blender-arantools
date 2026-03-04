@@ -427,6 +427,8 @@ class ARANTOOLS_PT_main(Panel):
                 row.label(text=item.mod_name, icon='MODIFIER_DATA')
                 row.label(text=item.mod_type)
             col.separator()
+            col.prop(props, "replace_all", icon='TRASH')
+            col.separator()
             copy_row = col.row(align=True)
             copy_row.scale_y = 1.3
             copy_row.operator("arantools.modsync_copy_to_selected",
