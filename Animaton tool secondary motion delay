@@ -1,0 +1,35 @@
+### Functional Specification: Delayed Secondary Motion (Bone Chain)
+
+**Objective**
+Write the core Python logic for an operator that generates overlapping action (delayed secondary motion) along a selected chain of bones. The tool will copy the animation from the root of the selection and propagate it down the chain with a cumulative time offset.
+
+#### 1. Input Validation & Sorting
+When the operator is executed, it must first analyze the user's current Pose Bone selection:
+* **Minimum Selection:** Ensure at least 2 bones are selected.
+* **Hierarchical Sorting:** Sort the selected bones into an ordered list from the "Root" (highest in the parent-child hierarchy) to the "Tip" (lowest). 
+* **Continuous Chain Check:** Verify that the sorted bones form a continuous, unbroken chain (e.g., `bone[1].parent == bone[0]`, `bone[2].parent == bone[1]`, etc.).
+* **Length Uniformity Check:** Calculate the length of each selected bone (`bone.length`). Compare the length of each child bone to the root bone of the selection. If any bone's length deviates by more than a reasonable tolerance (e.g., > 5% difference), throw a specific warning/error to the user and abort the operation.
+
+#### 2. Keyframe Extraction (The Source)
+* Identify the Root bone of the current selection (index 0 in the sorted list).
+* Locate the F-Curves associated with this Root bone in the active Action (`armature.animation_data.action.fcurves`).
+* Store the F-Curve data (specifically focusing on Rotation, like Euler or Quaternion, but ideally supporting Location and Scale if animated). 
+* *Crucial Context:* Assume these keyframes represent Local Space transforms relative to the bone's parent, which is what allows the chain to curl correctly when the animation is duplicated.
+
+#### 3. Keyframe Propagation & Offsetting (The Core Loop)
+* **Input Variable:** Assume there is a variable `delay_frames` (an integer or float representing the offset amount per bone).
+* Loop through the rest of the sorted bone chain (from index 1 to the end).
+* For each bone in the loop:
+    1.  Clear any existing keyframes on this specific bone to prevent overlapping data corruption.
+    2.  Duplicate the stored F-Curves from the Root bone onto this current bone.
+    3.  Iterate through all the newly pasted keyframes (the `co[0]` x-axis value representing time) and add an offset.
+    4.  **The Offset Math:** The shift amount should be cumulative based on the bone's depth in the selection.
+        * Offset = `delay_frames` * `current_loop_index`
+        * *(e.g., If delay is 2 frames: Bone 1 shifts 2 frames, Bone 2 shifts 4 frames, Bone 3 shifts 6 frames).*
+
+#### 4. Post-Execution
+* Ensure the active action updates to reflect the new keyframes so the viewport refreshes immediately.
+
+#### Notes for Claude:
+* Focus strictly on the F-Curve data manipulation (`bpy.types.Action` and `bpy.types.FCurve`). Do not try to insert keyframes using `bpy.ops.anim.keyframe_insert`, as directly copying and shifting F-Curve data points is vastly faster and more reliable for this kind of tool.
+* Handle quaternion vs. euler rotations gracefully—make sure the copied F-Curves maintain the correct `data_path` index (e.g., `rotation_euler` vs `rotation_quaternion`).
