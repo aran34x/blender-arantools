@@ -1,0 +1,56 @@
+### Specification for Blender Add-on: Armature Action Manager Module
+
+**Overview**
+Please write the Python code for a Blender 3.x/4.x add-on module (Panel, Operators, and Properties) that acts as a specialized Action Manager for a selected Armature. The goal is to provide a unified, fast-workflow UI to manage separate animations without relying on the NLA editor, using a specific naming convention that dictates the playback range.
+
+#### 1. Data Properties & Registration
+* **Target Armature:** Create a `PointerProperty` (type `bpy.types.Object`, filtered to `type == 'ARMATURE'`) attached to the `Scene` or `WindowManager`. This will serve as the persistent input armature picker.
+* **Action List:** Create a mechanism (like a `CollectionProperty` with a `UIList`, or an operator-driven layout) to display all actions associated with the selected armature.
+* **Active Action Index:** An `IntProperty` to track the currently selected action in the UI list.
+
+#### 2. UI Layout Requirements (The Panel)
+The panel should be located in the 3D Viewport `VIEW_3D` -> `UI` (N-panel), under a custom category (e.g., "Action Manager").
+* **Header:** An Object Picker (PointerProperty) for the target Armature. If no armature is selected, prompt the user to select one and hide the rest of the UI.
+* **NLA Warning Area:** A conditional UI block that only appears if the selected armature has active NLA tracks (see *Logic Constraints* below).
+* **Action List:** A vertical list of actions that involve the selected armature.
+    * Each row should display:
+        * The Action name (clickable to make it the active action).
+        * An integer property box (representing the End Frame of the action).
+        * A Duplicate button (Icon: `COPYDOWN`).
+        * A Delete button (Icon: `TRASH`).
+        * *(Optional but recommended)* A visual Fake User shield icon to reassure the user it is protected.
+
+#### 3. Core Behaviors & Logic Constraints
+
+**A. Action Filtering & Display**
+* The list must only display actions that are relevant to the selected armature (e.g., checking if the action's f-curves target the armature's pose bones, or simply pulling actions that share the armature's ID root).
+* **Fake User Enforcement:** Any action displayed in this list must have its Fake User status automatically set to `True` (`action.use_fake_user = True`) to prevent accidental deletion upon saving.
+
+**B. Action Selection (Clicking an Action)**
+When the user selects an action from the list:
+1.  Assign the action to the armature's animation data (`arm_obj.animation_data.action = selected_action`).
+2.  Automatically set the active object to the Armature.
+3.  Automatically switch the viewport mode to **Pose Mode** (`bpy.ops.object.mode_set(mode='POSE')`) so the user is immediately ready to animate.
+4.  Update the scene's Timeline playback range based on the action's name (see section C).
+
+**C. Naming Convention & Playback Range Syncing**
+* **Rule:** All actions use the naming convention `ActionName_Number`, where `Number` is the integer representing the End Frame of the animation.
+* **The End Frame UI Box:** Next to each action in the list, display an integer input field. This field reads the `Number` from the action's name.
+* **Updating the End Frame:** If the user changes this number in the UI:
+    1.  Parse the current action name, strip the old number, and rename the action in Blender's data block to `ActionName_NewNumber`.
+    2.  Automatically update the Scene's Timeline `frame_end` to this new number. (Assume `frame_start` should be set to 1, or the lowest keyframe of the action).
+
+**D. Action Operations (Operators)**
+* **Duplicate & Rename:** Clicking the duplicate button should copy the action (`action.copy()`). Immediately invoke a popup dialog (using `invoke_props_dialog`) prompting the user to type a new base name. Once confirmed, append the current end frame to the new name (e.g., `NewName_EndFrame`), assign it to the armature, and make it active.
+* **Delete:** Clicking the trash icon should permanently remove the action from `bpy.data.actions`. Handle the active action gracefully (clear it from `animation_data` if the currently active one is deleted).
+
+**E. NLA Editor "Quick Fix" Guardrail**
+* **Assumption:** The user is *not* using the NLA Editor; they are just using actions as separate animations.
+* **Detection:** Check if `len(armature.animation_data.nla_tracks) > 0`.
+* **Warning UI:** If True, display a warning icon and text: "Warning: NLA Tracks detected. This may override current action playback."
+* **Quick Fix Button:** Provide an operator button below the warning labeled "Quick Fix (Clear NLA)". When clicked, this operator should iterate through and delete all NLA tracks on the armature, restoring standard Action-driven playback.
+
+#### Notes for Claude:
+* Please implement the UI using a `UIList` or a dynamic `layout` loop for the actions, ensuring the End Frame integer can be edited directly from the list row.
+* Provide robust string parsing for the `ActionName_Number` convention (e.g., using `rsplit('_', 1)`) to avoid breaking if the base name contains underscores.
+* Ensure all context overrides for mode switching (`POSE`) are handled safely.
