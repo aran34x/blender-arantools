@@ -8,8 +8,7 @@ Please write the Python code for a Blender 3.x/4.x add-on module (Panel, Operato
 * **Action List:** Create a mechanism (like a `CollectionProperty` with a `UIList`, or an operator-driven layout) to display all actions associated with the selected armature.
 * **Active Action Index:** An `IntProperty` to track the currently selected action in the UI list.
 
-#### 2. UI Layout Requirements (The Panel)
-The panel should be located in the 3D Viewport `VIEW_3D` -> `UI` (N-panel), under a custom category (e.g., "Action Manager").
+#### 2.
 * **Header:** An Object Picker (PointerProperty) for the target Armature. If no armature is selected, prompt the user to select one and hide the rest of the UI.
 * **NLA Warning Area:** A conditional UI block that only appears if the selected armature has active NLA tracks (see *Logic Constraints* below).
 * **Action List:** A vertical list of actions that involve the selected armature.
@@ -19,6 +18,7 @@ The panel should be located in the 3D Viewport `VIEW_3D` -> `UI` (N-panel), unde
         * A Duplicate button (Icon: `COPYDOWN`).
         * A Delete button (Icon: `TRASH`).
         * *(Optional but recommended)* A visual Fake User shield icon to reassure the user it is protected.
+An add button to add a new action with the default 100 duration
 
 #### 3. Core Behaviors & Logic Constraints
 
