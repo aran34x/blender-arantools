@@ -67,6 +67,7 @@ _TOOL_REGISTRY = [
     # (id, name, description, tab, icon, draw_method, is_small)
     # is_small=True: always expanded, no collapse toggle (for single-button tools)
     ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform',  True),
+    ('mirror_bones',   'Mirror Bones',          'Mirror all .L bones to .R counterparts using Blender\'s Symmetrize',               'RIGGING',      'MOD_MIRROR',         '_draw_t_mirror_bones',   True),
     ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger', False),
     ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind',      False),
     ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
@@ -220,6 +221,10 @@ class ARANTOOLS_PT_main(Panel):
 
     def _draw_t_select_deform(self, layout, context):
         layout.operator("arantools.select_deform_bones", icon='BONE_DATA')
+
+    def _draw_t_mirror_bones(self, layout, context):
+        layout.label(text="Select an armature in Object Mode.", icon='INFO')
+        layout.operator("arantools.mirror_bones", icon='MOD_MIRROR')
 
     def _draw_t_feather_rigger(self, layout, context):
         fr = context.scene.arantools_feather_rig
