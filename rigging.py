@@ -66,38 +66,6 @@ class ARANTOOLS_OT_select_bone_type(Operator):
 
 
 # ============================================================================
-# Mirror Bones
-# ============================================================================
-
-class ARANTOOLS_OT_mirror_bones(Operator):
-    """Mirror .L bones to .R using Blender's Symmetrize"""
-    bl_idname = "arantools.mirror_bones"
-    bl_label = "Mirror Bones L→R"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        armature = context.object
-        if not armature or armature.type != 'ARMATURE':
-            self.report({'ERROR'}, "No armature selected")
-            return {'CANCELLED'}
-
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.armature.select_all(action='DESELECT')
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        for bone in armature.data.bones:
-            if bone.name.endswith('.L'):
-                bone.select = True
-
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.armature.symmetrize(direction='NEGATIVE_X')
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        self.report({'INFO'}, "Mirrored .L bones to .R")
-        return {'FINISHED'}
-
-
-# ============================================================================
 # Feather Rigger — helpers
 # ============================================================================
 
@@ -916,7 +884,6 @@ class ARANTOOLS_OT_DirectArpBind(Operator):
 classes = [
     ARANTOOLS_OT_select_deform_bones,
     ARANTOOLS_OT_select_bone_type,
-    ARANTOOLS_OT_mirror_bones,
     ARANTOOLS_PG_FeatherRig,
     ARANTOOLS_OT_RigFeathers,
     ARANTOOLS_PG_AdvRigging,
