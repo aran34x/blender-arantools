@@ -19,6 +19,7 @@ from . import organization
 from . import export
 from . import island_flatten
 from . import modifier_sync
+from . import stagger_anim
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -83,6 +84,7 @@ _TOOL_REGISTRY = [
     ('seq_namer',      'Object Sequence Namer',  'Name selected objects as a numbered sequence (e.g. Monkey_01, Monkey_02), filling gaps and respecting existing names', 'NAMING', 'LINENUMBERS_ON', '_draw_t_seq_namer', False),
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
+    ('stagger_anim',   'Staggered Animation',    'Offset keyframes of each selected bone or object to create a ripple stagger effect', 'ANIMATION',   'NLA_PUSHDOWN',       '_draw_t_stagger_anim',   False),
 ]
 
 # Only collapsible (non-small) tools need a BoolProperty
@@ -587,6 +589,24 @@ class ARANTOOLS_PT_main(Panel):
         col.separator()
         col.operator("arantools.remove_noise", icon='X')
 
+    def _draw_t_stagger_anim(self, layout, context):
+        props = context.scene.arantools_stagger_anim
+        col   = layout.column(align=True)
+
+        col.label(text="Settings:", icon='KEYFRAME')
+        col.prop(props, "offset")
+        col.prop(props, "order",    text="Sort By")
+        col.prop(props, "channels", text="Channels")
+        col.prop(props, "reverse")
+        col.separator()
+
+        col.label(text="Works in Object or Pose mode.", icon='INFO')
+        col.separator()
+
+        run_row = col.row()
+        run_row.scale_y = 1.4
+        run_row.operator("arantools.stagger_apply", icon='NLA_PUSHDOWN')
+
 
 # ============================================================================
 # Registration
@@ -602,6 +622,7 @@ classes = [
 def register():
     rigging.register()
     animation.register()
+    stagger_anim.register()
     naming.register()
     weight_tools.register()
     organization.register()
@@ -653,5 +674,6 @@ def unregister():
     organization.unregister()
     weight_tools.unregister()
     naming.unregister()
+    stagger_anim.unregister()
     animation.unregister()
     rigging.unregister()
