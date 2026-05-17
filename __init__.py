@@ -80,8 +80,11 @@ _TOOL_REGISTRY = [
     ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
     ('mod_sync',       'Modifier Sync',          'Save a modifier stack from one object and copy or sync it to other objects',       'ORGANIZATION', 'MODIFIER',           '_draw_t_mod_sync',       False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
+    ('export_sets',    'ARP Export Sets',        'Group meshes into named sets and batch-export each as its own FBX via Auto-Rig Pro. Overwrites existing files', 'EXPORT', 'GROUP',          '_draw_t_export_sets',    False),
     ('seq_namer',      'Object Sequence Namer',  'Name selected objects as a numbered sequence (e.g. Monkey_01, Monkey_02), filling gaps and respecting existing names', 'NAMING', 'LINENUMBERS_ON', '_draw_t_seq_namer', False),
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
+    ('anim_org',       'Animation Organization', 'Manage an armature\'s actions: list, create (with Fake User), and auto-set the timeline from a "_NNN" duration suffix', 'ANIMATION', 'ACTION',           '_draw_t_anim_org',       False),
+    ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
 ]
 
@@ -368,18 +371,21 @@ class ARANTOOLS_PT_main(Panel):
             layout.label(text="Select a Source Collection.", icon='INFO')
 
     def _draw_t_arp_export(self, layout, context):
+        from . import export as _export
         props = context.scene.arantools_arp_export
         col = layout.column(align=True)
         col.prop(props, "target_armature")
         col.prop(props, "export_folder")
         col.separator()
-        col.label(text="Naming Rules:")
+
+        # ── Mesh naming ───────────────────────────────────────────────────
+        col.label(text="Mesh Naming:", icon='OBJECT_DATAMODE')
         col.prop(props, "remove_str", text="Remove")
         row = col.row(align=True)
         row.prop(props, "prefix_str", text="Prefix")
         row.prop(props, "suffix_str", text="Suffix")
-        col.separator()
-        from . import export as _export
+
+        # ── Mesh preview ──────────────────────────────────────────────────
         selected_meshes = [
             obj for obj in context.selected_objects
             if obj != props.target_armature and obj.type == 'MESH'
@@ -397,12 +403,161 @@ class ARANTOOLS_PT_main(Panel):
                 preview_box.label(text="+ " + str(len(selected_meshes) - 1) + " more selected")
         else:
             layout.label(text="Select meshes to preview.", icon='INFO')
+
+        col2 = layout.column(align=True)
+        col2.separator()
+
+        # ── Anim naming ───────────────────────────────────────────────────
+        col2.label(text="Anim Naming:", icon='ANIM')
+        col2.prop(props, "anim_remove_str", text="Remove")
+        row = col2.row(align=True)
+        row.prop(props, "anim_prefix_str", text="Prefix")
+        row.prop(props, "anim_suffix_str", text="Suffix")
+        col2.prop(props, "anim_only_active")
+
+        # ── Anim preview ──────────────────────────────────────────────────
+        arm = props.target_armature
+        if arm is None:
+            layout.label(text="Pick an armature to preview animations.", icon='INFO')
+            anim_actions = []
+        elif props.anim_only_active:
+            if arm.animation_data and arm.animation_data.action:
+                anim_actions = [arm.animation_data.action]
+            else:
+                layout.label(text="Armature has no active action.", icon='INFO')
+                anim_actions = []
+        else:
+            anim_actions = list(_export._iter_armature_actions(arm))
+            if not anim_actions:
+                layout.label(text="No armature actions found.", icon='INFO')
+
+        if anim_actions:
+            preview_box = layout.box()
+            act = anim_actions[0]
+            final_anim = _export._get_anim_filename(act.name, props)
+            preview_box.label(text="Org:  " + act.name, icon='ACTION')
+            if not final_anim:
+                preview_box.label(text="New:  [EMPTY NAME]", icon='ERROR')
+            else:
+                preview_box.label(text="New:  " + final_anim + ".fbx", icon='FORWARD')
+            if len(anim_actions) > 1:
+                preview_box.label(text="+ " + str(len(anim_actions) - 1) + " more action(s)")
+
+        # ── Export buttons ────────────────────────────────────────────────
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.enabled = bool(props.target_armature)
         row.operator("arantools.arp_batch_export", text="Export Meshes", icon='EXPORT')
         row.operator("arantools.arp_anim_export",  text="Animations",    icon='ANIM')
         layout.label(text="Requires Auto-Rig Pro", icon='ERROR')
+
+    def _draw_t_export_sets(self, layout, context):
+        from . import export as _export
+        props = context.scene.arantools_arp_export
+        col = layout.column(align=True)
+
+        # ── Status: armature + folder come from ARP Batch Export above ────
+        if props.target_armature is None:
+            col.label(text="Set Armature & Folder in ARP Batch Export first.",
+                      icon='ERROR')
+        else:
+            col.label(text=f"Armature: {props.target_armature.name}",
+                      icon='ARMATURE_DATA')
+            col.label(text=f"Folder: {props.export_folder}", icon='FILE_FOLDER')
+        col.separator()
+
+        # ── Add buttons ───────────────────────────────────────────────────
+        add_row = col.row(align=True)
+        add_row.scale_y = 1.2
+        add_row.operator("arantools.expset_add_from_selection",
+                         text="+ From Selection", icon='RESTRICT_SELECT_OFF')
+        add_row.operator("arantools.expset_add",
+                         text="+ Empty", icon='NEWFOLDER')
+
+        if not props.export_sets:
+            col.separator()
+            col.label(text="No sets yet. Select meshes → '+ From Selection'.",
+                      icon='INFO')
+            return
+
+        # ── Duplicate-filename detector ───────────────────────────────────
+        name_counts = {}
+        for s in props.export_sets:
+            nm = _export._clean_relpath(s.filename)
+            if nm:
+                name_counts[nm] = name_counts.get(nm, 0) + 1
+
+        # ── One box per set ───────────────────────────────────────────────
+        for i, eset in enumerate(props.export_sets):
+            box = layout.box()
+            header = box.row(align=True)
+            header.prop(eset, "expanded", text="", emboss=False,
+                        icon='TRIA_DOWN' if eset.expanded else 'TRIA_RIGHT')
+            header.prop(eset, "filename", text="")
+            op = header.operator("arantools.expset_remove",
+                                 text="", icon='X')
+            op.index = i
+
+            if not eset.expanded:
+                continue
+
+            body = box.column(align=True)
+
+            # Preview: cleaned filename
+            clean = _export._clean_relpath(eset.filename)
+            if not clean:
+                body.label(text="Empty filename — set will be skipped.",
+                           icon='ERROR')
+            elif name_counts.get(clean, 0) > 1:
+                body.label(text=f"Org:  {eset.filename}", icon='OBJECT_DATAMODE')
+                body.label(text=f"New:  {clean}.fbx  (duplicate!)", icon='ERROR')
+            else:
+                body.label(text=f"Org:  {eset.filename}", icon='OBJECT_DATAMODE')
+                body.label(text=f"New:  {clean}.fbx", icon='FORWARD')
+
+            # Mesh summary
+            valid = [e.obj for e in eset.meshes if e.obj is not None]
+            missing = len(eset.meshes) - len(valid)
+            if valid:
+                names = ", ".join(m.name for m in valid[:6])
+                if len(valid) > 6:
+                    names += f" … (+{len(valid) - 6})"
+                body.label(text=f"Meshes ({len(valid)}): {names}",
+                           icon='MESH_DATA')
+            else:
+                body.label(text="No meshes yet — pick selection.", icon='INFO')
+            if missing:
+                body.label(text=f"{missing} deleted reference(s).", icon='ERROR')
+
+            # Mesh management buttons
+            mbtn = body.row(align=True)
+            for op_id, text, icon in (
+                ("arantools.expset_set_meshes", "Set",    'IMPORT'),
+                ("arantools.expset_add_meshes", "Add",    'ADD'),
+                ("arantools.expset_clear",      "Clear",  'X'),
+                ("arantools.expset_select",     "Select", 'RESTRICT_SELECT_OFF'),
+            ):
+                op = mbtn.operator(op_id, text=text, icon=icon)
+                op.index = i
+
+            # Per-set export
+            ex_row = body.row()
+            ex_row.scale_y = 1.2
+            ex_row.enabled = bool(valid) and bool(clean) \
+                             and props.target_armature is not None
+            op = ex_row.operator("arantools.expset_export",
+                                 text="Export This Set", icon='EXPORT')
+            op.index = i
+
+        # ── Batch button ──────────────────────────────────────────────────
+        layout.separator()
+        big = layout.row()
+        big.scale_y = 1.4
+        big.enabled = props.target_armature is not None
+        big.operator("arantools.expset_export_all",
+                     text="Export All Sets", icon='EXPORT')
+        layout.label(text="Overwrites existing files. Requires Auto-Rig Pro.",
+                     icon='INFO')
 
     def _draw_t_mod_sync(self, layout, context):
         props = context.scene.arantools_mod_sync
@@ -509,6 +664,122 @@ class ARANTOOLS_PT_main(Panel):
         row = col.row(align=True)
         row.operator("arantools.rename_bone", text='Rename  (Alt+Shift+R)', icon='GREASEPENCIL')
         col.operator("arantools.reset_counter", text='Reset Counter  (Shift+Y)', icon='LOOP_BACK')
+
+    def _draw_t_anim_org(self, layout, context):
+        from . import animation as _anim
+        props = context.scene.arantools_anim_org
+        col = layout.column(align=True)
+
+        col.prop(props, "armature")
+        if props.armature is None:
+            col.label(text="Pick an armature to begin.", icon='INFO')
+            return
+
+        arm = props.armature
+        col.separator()
+
+        # ── Active action status ─────────────────────────────────────────
+        if arm.animation_data and arm.animation_data.action:
+            act = arm.animation_data.action
+            info = col.row(align=True)
+            info.label(text="Active:  " + act.name, icon='ACTION')
+            info.operator("arantools.animorg_sync_timeline", text="", icon='TIME')
+            parsed = _anim._parse_duration(act.name)
+            if parsed is None:
+                col.label(text="Name has no '_NNN' duration suffix.", icon='ERROR')
+        else:
+            col.label(text="No active action on this armature.", icon='INFO')
+
+        col.separator()
+
+        # ── Action list ──────────────────────────────────────────────────
+        col.label(text="Actions:", icon='OUTLINER_DATA_GP_LAYER')
+        col.template_list(
+            "ARANTOOLS_UL_AnimOrg_Actions", "",
+            bpy.data, "actions",
+            props, "action_index",
+            rows=8,
+        )
+        filt = col.row(align=True)
+        filt.prop(props, "only_armature_actions", toggle=True)
+        filt.prop(props, "auto_sync_timeline", toggle=True)
+
+        col.separator()
+
+        # ── New action ───────────────────────────────────────────────────
+        col.label(text="Create New Action:", icon='ADD')
+        col.prop(props, "new_action_name", text="")
+        parsed_new = _anim._parse_duration(props.new_action_name)
+        if parsed_new is not None:
+            col.label(text=f"Timeline will be 1 → {parsed_new}", icon='TIME')
+        else:
+            col.label(text="Append '_NNN' to set timeline (e.g. _400).", icon='INFO')
+        create_row = col.row()
+        create_row.scale_y = 1.3
+        create_row.operator("arantools.animorg_new_action",
+                            text="Create & Activate", icon='ADD')
+
+    def _draw_t_spring_smooth(self, layout, context):
+        props = context.scene.arantools_curve_smooth
+        col   = layout.column(align=True)
+
+        # ── Channels + per-axis locks ─────────────────────────────────────
+        col.label(text="Channels  /  Axes:", icon='DECORATE_KEYFRAME')
+
+        for chan_prop, axes_prop, label, icon in (
+            ('apply_location', 'location_axes', 'Location', 'OBJECT_ORIGIN'),
+            ('apply_rotation', 'rotation_axes', 'Rotation', 'ORIENTATION_GIMBAL'),
+            ('apply_scale',    'scale_axes',    'Scale',    'OBJECT_DATAMODE'),
+        ):
+            row = col.row(align=True)
+            row.prop(props, chan_prop, text=label, toggle=True, icon=icon)
+            axis_row = row.row(align=True)
+            axis_row.enabled = getattr(props, chan_prop)
+            axis_row.prop(props, axes_prop, text="", toggle=True)
+        col.separator()
+
+        # ── Spring parameters ─────────────────────────────────────────────
+        col.label(text="Spring:", icon='IPO_BOUNCE')
+        col.prop(props, "stiffness", slider=True)
+        col.prop(props, "damping",   slider=True)
+        col.prop(props, "blend",     slider=True, text="Strength")
+        col.separator()
+
+        # ── Stop preservation ─────────────────────────────────────────────
+        col.label(text="Stop Points:", icon='SNAP_MIDPOINT')
+        col.prop(props, "preserve_stops")
+        sub = col.column(align=True)
+        sub.enabled = props.preserve_stops
+        sub.prop(props, "stop_tolerance")
+        col.separator()
+
+        # ── Advanced ──────────────────────────────────────────────────────
+        col.prop(props, "substeps")
+        col.separator()
+
+        # ── Decimate (uses Blender's graph.decimate) ──────────────────────
+        col.label(text="Decimate:", icon='SHARPCURVE')
+        col.prop(props, "decimate_after")
+        sub = col.column(align=True)
+        sub.enabled = props.decimate_after
+        sub.prop(props, "decimate_mode", text="")
+        if props.decimate_mode == 'ERROR':
+            sub.prop(props, "decimate_error")
+        else:
+            sub.prop(props, "decimate_ratio", slider=True)
+        col.separator()
+
+        # ── Apply ─────────────────────────────────────────────────────────
+        if context.mode != 'POSE':
+            col.label(text="Enter Pose Mode to run.", icon='ERROR')
+        elif not (context.selected_pose_bones or []):
+            col.label(text="Select pose bones first.", icon='INFO')
+        apply_row = col.row()
+        apply_row.scale_y = 1.4
+        apply_row.operator("arantools.spring_smooth_curves",
+                           text="Spring Smooth", icon='IPO_BOUNCE')
+        col.operator("arantools.decimate_smooth_curves",
+                     text="Decimate Only", icon='SHARPCURVE')
 
     def _draw_t_noise_bones(self, layout, context):
         scene = context.scene
