@@ -456,14 +456,14 @@ class ARANTOOLS_PT_main(Panel):
         props = context.scene.arantools_arp_export
         col = layout.column(align=True)
 
-        # ── Status: armature + folder come from ARP Batch Export above ────
+        # ── Dedicated folder for this tool ────────────────────────────────
+        col.prop(props, "export_sets_folder", text="Folder")
         if props.target_armature is None:
-            col.label(text="Set Armature & Folder in ARP Batch Export first.",
+            col.label(text="Set Armature in ARP Batch Export above.",
                       icon='ERROR')
         else:
             col.label(text=f"Armature: {props.target_armature.name}",
                       icon='ARMATURE_DATA')
-            col.label(text=f"Folder: {props.export_folder}", icon='FILE_FOLDER')
         col.separator()
 
         # ── Add buttons ───────────────────────────────────────────────────
@@ -557,6 +557,64 @@ class ARANTOOLS_PT_main(Panel):
         big.operator("arantools.expset_export_all",
                      text="Export All Sets", icon='EXPORT')
         layout.label(text="Overwrites existing files. Requires Auto-Rig Pro.",
+                     icon='INFO')
+
+        # ── Animation Export sub-section ──────────────────────────────────
+        layout.separator(factor=2.0)
+        anim_header = layout.row()
+        anim_header.label(text="Animation Export", icon='ANIM')
+
+        acol = layout.column(align=True)
+        acol.prop(props, "anim_export_folder", text="Folder")
+        acol.prop(props, "anim_export_prefix", text="Prefix")
+
+        if props.target_armature is None:
+            acol.label(text="Pick an armature above first.", icon='ERROR')
+            return
+
+        # Refresh / select-all / select-none
+        list_btns = acol.row(align=True)
+        list_btns.operator("arantools.anim_export_refresh",
+                           text="Refresh", icon='FILE_REFRESH')
+        list_btns.operator("arantools.anim_export_select_all", text="All")
+        list_btns.operator("arantools.anim_export_select_none", text="None")
+
+        if not props.anim_export_items:
+            acol.label(text="Click Refresh to list armature actions.",
+                       icon='INFO')
+            return
+
+        layout.template_list(
+            "ARANTOOLS_UL_AnimExportList", "",
+            props, "anim_export_items",
+            props, "anim_export_index",
+            rows=6,
+        )
+
+        # ── Single-line preview + button for full popup ───────────────────
+        enabled_items = [it for it in props.anim_export_items
+                         if it.enabled and it.action is not None]
+        prev_col = layout.column(align=True)
+        if enabled_items:
+            first = enabled_items[0]
+            base = bpy.path.clean_name(props.anim_export_prefix + first.action.name)
+            if base:
+                prev_col.label(text=f"e.g.  {base}.fbx   "
+                                    f"({len(enabled_items)} total)",
+                               icon='FILE')
+            else:
+                prev_col.label(text="[EMPTY FILENAME]", icon='ERROR')
+            prev_col.operator("arantools.anim_export_preview_paths",
+                              text="Preview All Paths", icon='VIEWZOOM')
+        else:
+            prev_col.label(text="No actions ticked.", icon='INFO')
+
+        big2 = layout.row()
+        big2.scale_y = 1.4
+        big2.enabled = bool(enabled_items)
+        big2.operator("arantools.anim_export_run",
+                      text="Export Selected Animations", icon='EXPORT')
+        layout.label(text="Filename = Prefix + Action name. Overwrites existing.",
                      icon='INFO')
 
     def _draw_t_mod_sync(self, layout, context):
