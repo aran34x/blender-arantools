@@ -1,5 +1,5 @@
 """
-Tree Inspector â€” dump UV layers, vertex colors, materials, modifiers, and
+Tree Inspector — dump UV layers, vertex colors, materials, modifiers, and
 collection hierarchy as a JSON report for reverse-engineering foliage /
 tree setups (SpeedTree-style wind encoding, custom LOD pipelines, etc.).
 
@@ -72,7 +72,7 @@ def _inspect_uv_layer(uv):
     samples = [(round(uv.data[i].uv[0], 4), round(uv.data[i].uv[1], 4))
                for i in range(0, len(uv.data), step)][:6]
     # When unique counts are small enough to enumerate, list every value
-    # with a count â€” much more useful than min/max/mean for guessing the
+    # with a count — much more useful than min/max/mean for guessing the
     # encoding (e.g. "per-cluster ID with N clusters").
     u_table = None
     if len(set(round(u, 4) for u in us)) <= 32:
@@ -159,7 +159,7 @@ def _inspect_material(mat):
 
 
 def _mesh_islands(me):
-    """Union-find on edges â†’ list of vertex-index sets, one per island."""
+    """Union-find on edges → list of vertex-index sets, one per island."""
     n = len(me.vertices)
     parent = list(range(n))
 
@@ -263,7 +263,7 @@ def _per_island_channel_analysis(obj):
 def _per_material_analysis(obj):
     """Partition the mesh's loops by material slot and run UV / vcolor
     statistics on each partition. This is the trunk-vs-leaves split the
-    artist usually cares about â€” wood and leaf shaders typically read
+    artist usually cares about — wood and leaf shaders typically read
     different encodings, so the per-material breakdown immediately shows
     e.g. 'wood color = all (0,0,0,1), leaves vary'."""
     me = obj.data
@@ -409,6 +409,160 @@ def _build_report(context, targets):
 
 
 # ============================================================================
+# Per-loop CSV dump — every face corner becomes one row.
+#
+# Used to reverse-engineer encoding patterns: open the CSV in a
+# spreadsheet, group by vertex_index or branch_id, and look at how UV /
+# color channels correlate with position. Lets you confirm e.g. whether
+# UVMap1 is per-branch-min-Z vs bounding-box-center vs something else
+# without having to guess from min/max stats.
+# ============================================================================
+
+def _build_loop_csv(context, targets, max_rows=0):
+    """Return a single CSV string covering every loop on every target
+    mesh. Columns: object, material, vertex, polygon, loop, x, y, z,
+    plus one column per UV (U/V) and one per color (R/G/B/A) and one
+    per scalar named-attribute (POINT/CORNER/EDGE/FACE)."""
+    import csv as _csv
+    import io as _io
+
+    deps = context.evaluated_depsgraph_get()
+    buf = _io.StringIO()
+    writer = _csv.writer(buf)
+
+    # Build column headers from the first object (or union if mixed).
+    # For consistency we just write a per-object header section.
+    for obj in targets:
+        obj_eval = obj.evaluated_get(deps)
+        try:
+            mesh = obj_eval.to_mesh()
+        except RuntimeError as e:
+            writer.writerow([f"# {obj.name}: to_mesh failed: {e}"])
+            continue
+        try:
+            if not mesh.loops:
+                writer.writerow([f"# {obj.name}: no loops"])
+                continue
+
+            # Per-mesh header banner.
+            writer.writerow([])
+            writer.writerow([f"## OBJECT: {obj.name}",
+                             f"verts={len(mesh.vertices)}",
+                             f"polys={len(mesh.polygons)}",
+                             f"loops={len(mesh.loops)}"])
+
+            # Collect all attributes we want to project per-loop:
+            # UVs (CORNER), color (CORNER/POINT), plus every named float/
+            # int/bool attribute on POINT/CORNER/EDGE/FACE domains.
+            uv_layers = list(mesh.uv_layers)
+
+            color_layers = [a for a in mesh.color_attributes]
+
+            scalar_attrs = []
+            for a in mesh.attributes:
+                if a.name in {l.name for l in uv_layers}:
+                    continue  # UVs already covered
+                if a.name in {l.name for l in color_layers}:
+                    continue  # Color already covered
+                if a.data_type in ('FLOAT', 'INT', 'BOOLEAN'):
+                    scalar_attrs.append(a)
+                elif a.data_type in ('FLOAT_VECTOR', 'FLOAT2'):
+                    scalar_attrs.append(a)  # split into components later
+
+            # Pre-pull arrays. For CORNER/POINT/EDGE/FACE we resolve to
+            # per-loop in the inner loop.
+            def loop_vert(li): return mesh.loops[li].vertex_index
+            def loop_edge(li): return mesh.loops[li].edge_index
+
+            # Map loop → polygon for FACE-domain reads
+            loop_to_poly = [-1] * len(mesh.loops)
+            for pi, poly in enumerate(mesh.polygons):
+                for li in poly.loop_indices:
+                    loop_to_poly[li] = pi
+
+            # Column header row.
+            header = [
+                "loop_idx", "vert_idx", "poly_idx",
+                "vert_x", "vert_y", "vert_z",
+                "material",
+            ]
+            for uv in uv_layers:
+                header.append(f"{uv.name}.U")
+                header.append(f"{uv.name}.V")
+            for ca in color_layers:
+                for ch in ('R', 'G', 'B', 'A'):
+                    header.append(f"{ca.name}.{ch}")
+            for a in scalar_attrs:
+                if a.data_type == 'FLOAT_VECTOR':
+                    header.extend([f"{a.name}.x", f"{a.name}.y", f"{a.name}.z"])
+                elif a.data_type == 'FLOAT2':
+                    header.extend([f"{a.name}.x", f"{a.name}.y"])
+                else:
+                    header.append(a.name)
+                header[-1] += f"({a.domain})"
+            writer.writerow(header)
+
+            mat_names = [m.name if m else "" for m in mesh.materials]
+
+            rows_written = 0
+            for li in range(len(mesh.loops)):
+                if max_rows and rows_written >= max_rows:
+                    writer.writerow([f"# truncated at {max_rows} rows"])
+                    break
+                vi = loop_vert(li)
+                pi = loop_to_poly[li]
+                co = mesh.vertices[vi].co
+                poly = mesh.polygons[pi] if pi >= 0 else None
+                mat_idx = poly.material_index if poly else -1
+                row = [
+                    li, vi, pi,
+                    round(co.x, 6), round(co.y, 6), round(co.z, 6),
+                    mat_names[mat_idx] if 0 <= mat_idx < len(mat_names) else "",
+                ]
+                for uv in uv_layers:
+                    row.append(round(uv.data[li].uv[0], 6))
+                    row.append(round(uv.data[li].uv[1], 6))
+                for ca in color_layers:
+                    c = ca.data[vi if ca.domain == 'POINT' else li].color
+                    row.extend(round(v, 6) for v in c)
+                for a in scalar_attrs:
+                    if a.domain == 'POINT':
+                        d = a.data[vi]
+                    elif a.domain == 'CORNER':
+                        d = a.data[li]
+                    elif a.domain == 'EDGE':
+                        ei = loop_edge(li)
+                        d = a.data[ei] if ei < len(a.data) else None
+                    elif a.domain == 'FACE':
+                        d = a.data[pi] if 0 <= pi < len(a.data) else None
+                    else:
+                        d = None
+                    if d is None:
+                        if a.data_type == 'FLOAT_VECTOR':
+                            row.extend(["", "", ""])
+                        elif a.data_type == 'FLOAT2':
+                            row.extend(["", ""])
+                        else:
+                            row.append("")
+                        continue
+                    if a.data_type == 'FLOAT_VECTOR':
+                        v = d.vector
+                        row.extend((round(v[0], 6), round(v[1], 6),
+                                    round(v[2], 6)))
+                    elif a.data_type == 'FLOAT2':
+                        v = d.vector
+                        row.extend((round(v[0], 6), round(v[1], 6)))
+                    else:
+                        row.append(d.value)
+                writer.writerow(row)
+                rows_written += 1
+        finally:
+            obj_eval.to_mesh_clear()
+
+    return buf.getvalue()
+
+
+# ============================================================================
 # Property group
 # ============================================================================
 
@@ -438,6 +592,21 @@ class ARANTOOLS_PG_TreeInspect(PropertyGroup):
         ],
         default='SELECTED',
     )
+    export_loop_csv: bpy.props.BoolProperty(
+        name="Export Per-Loop CSV",
+        description="Also write a detailed CSV — one row per face corner "
+                    "with vertex XYZ, every UV channel, every color channel, "
+                    "and every named attribute. Open in a spreadsheet to "
+                    "pivot/filter and reverse-engineer the encoding pattern",
+        default=False,
+    )
+    csv_max_rows: bpy.props.IntProperty(
+        name="CSV Row Limit",
+        description="Cap rows per object in the CSV (0 = unlimited). "
+                    "Use a small value to spot-check; full dump can be "
+                    "100k+ rows on a complex tree",
+        default=0, min=0, soft_max=200000,
+    )
 
 
 # ============================================================================
@@ -446,7 +615,7 @@ class ARANTOOLS_PG_TreeInspect(PropertyGroup):
 
 class ARANTOOLS_OT_TreeInspect(Operator):
     """Dump every targeted mesh's UV layers (with per-channel ranges),
-color attributes (with value distributions + quantization hints â€” BINARY
+color attributes (with value distributions + quantization hints — BINARY
 MASK / DISCRETE / CONTINUOUS), materials (full shader graph), modifiers,
 vertex groups, collection hierarchy, and any geometry-node groups in the
 file as a single JSON report. Used to reverse-engineer existing foliage
@@ -496,25 +665,38 @@ your own."""
             except Exception as e:
                 print(f"[AranTools] Clipboard copy failed: {e}")
 
+        csv_msg = ""
+        if props.export_loop_csv:
+            csv_text = _build_loop_csv(context, targets,
+                                        max_rows=props.csv_max_rows)
+            csv_base, _ = os.path.splitext(out_path)
+            csv_path = csv_base + "_loops.csv"
+            try:
+                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(csv_text)
+                csv_msg = f" + per-loop CSV → {csv_path}"
+            except Exception as e:
+                csv_msg = f" (CSV write failed: {e})"
+
         self.report({'INFO'},
-                    f"Inspected {len(targets)} mesh(es) â†’ {out_path}"
-                    + clipboard_msg)
+                    f"Inspected {len(targets)} mesh(es) → {out_path}"
+                    + clipboard_msg + csv_msg)
         return {'FINISHED'}
 
 
 # ============================================================================
-# UV validator â€” checks that the final evaluated mesh carries the
+# UV validator — checks that the final evaluated mesh carries the
 # SpeedTree-style wind/identification encoding produced by the Branch
 # Tubes + Branch UV geonodes:
 #
-#   UVMap   (or UVmap_0)   : artist texture UVs â€” must exist
+#   UVMap   (or UVmap_0)   : artist texture UVs — must exist
 #   UVMap2 (Float2, CORNER): (branch_base_z, tree_max_z)
 #       U = per-island pivot; should be constant per branch_id and match
 #           the corresponding loop's vertex `branch_base_z` attribute
 #       V = constant across the whole mesh (= max Z of all verts)
-#   UVMap3 (Float2, CORNER): (0, 1) â€” constant placeholder
+#   UVMap3 (Float2, CORNER): (0, 1) — constant placeholder
 #   Attribute (Color)       : (0, 0, wind_mask, 1)
-#       R = 0, G = 0, A = 1, B âˆˆ [0,1]
+#       R = 0, G = 0, A = 1, B ∈ [0,1]
 #       B must be 0 on any vertex flagged is_underground
 # ============================================================================
 
@@ -528,7 +710,7 @@ def _approx_eq(a, b, eps=_EPS):
 def _get_attr_values(mesh, name):
     """Return (values, domain) for a named attribute, or (None, None) if
     absent. `values` is a flat list whose length matches the domain
-    (POINT â†’ len(verts), CORNER â†’ len(loops), EDGE â†’ len(edges)â€¦)."""
+    (POINT → len(verts), CORNER → len(loops), EDGE → len(edges)…)."""
     attr = mesh.attributes.get(name)
     if attr is None:
         return None, None
@@ -546,7 +728,7 @@ def _get_attr_values(mesh, name):
 
 
 def _loop_to_vert(mesh):
-    """[loop_index] â†’ vertex_index lookup for spreading per-vert attrs
+    """[loop_index] → vertex_index lookup for spreading per-vert attrs
     onto face-corner data for cross-domain checks."""
     return [lp.vertex_index for lp in mesh.loops]
 
@@ -585,7 +767,7 @@ def _resolve_per_loop(values, domain, mesh):
 
 def _connected_components(mesh):
     """Return a list of component-id per vertex via BFS over edges. Pure
-    Python â€” fine for the 10k-vert skeletons we deal with."""
+    Python — fine for the 10k-vert skeletons we deal with."""
     n = len(mesh.vertices)
     comp = [-1] * n
     adj = [[] for _ in range(n)]
@@ -611,10 +793,10 @@ def _connected_components(mesh):
 
 def _validate_tree_uvs(obj, context):
     """Run the validator on a single object's evaluated mesh. Returns a
-    list of (level, message) tuples where level âˆˆ {'OK', 'WARN', 'FAIL'}."""
+    list of (level, message) tuples where level ∈ {'OK', 'WARN', 'FAIL'}."""
     results = []
 
-    # Pre-flight on the SKELETON (the modifier-input mesh) â€” diagnose the
+    # Pre-flight on the SKELETON (the modifier-input mesh) — diagnose the
     # most common cause of UV failures: bridge edges not being flagged
     # because the user hasn't re-run Setup after the refactor that
     # introduced `is_branch_entry`.
@@ -622,11 +804,11 @@ def _validate_tree_uvs(obj, context):
     if 'is_branch_entry' not in src.attributes:
         results.append(('FAIL',
             "Skeleton (modifier-input mesh) has NO 'is_branch_entry' "
-            "attribute â€” the tubes geonode can't delete bridge edges, "
+            "attribute — the tubes geonode can't delete bridge edges, "
             "so branches stay topologically merged at junctions. "
-            "Re-run Branch Skeleton â†’ Setup."))
+            "Re-run Branch Skeleton → Setup."))
     elif 'is_branch_entry' in src.attributes:
-        # Count how many entry edges were flagged. Should be â‰ˆ
+        # Count how many entry edges were flagged. Should be ≈
         # (number of branches - 1).
         ie = src.attributes['is_branch_entry']
         if ie.domain == 'EDGE':
@@ -652,7 +834,7 @@ def _validate_tree_uvs(obj, context):
                 "Evaluated mesh has no loops (faces). "
                 "Did the tubes geonode build geometry?")]
 
-        # Component count vs branch_id island count â€” these MUST agree
+        # Component count vs branch_id island count — these MUST agree
         # for branch_base_z to be unambiguous per island. If components
         # > branch_id islands, branches are still topologically joined.
         comp, n_comp = _connected_components(mesh)
@@ -667,33 +849,33 @@ def _validate_tree_uvs(obj, context):
             elif n_comp < n_islands:
                 results.append(('FAIL',
                     f"Only {n_comp} connected component(s) but "
-                    f"{n_islands} distinct branch_id values â€” bridge "
+                    f"{n_islands} distinct branch_id values — bridge "
                     f"edges weren't fully cut. Each merged junction "
                     f"makes branch_base_z vary within an island."))
             else:
                 results.append(('WARN',
                     f"More connected components ({n_comp}) than "
-                    f"branch_id islands ({n_islands}). Unexpected â€” "
+                    f"branch_id islands ({n_islands}). Unexpected — "
                     f"possible loose geometry."))
 
-        # â”€â”€ UVMap (artist texture UVs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── UVMap (artist texture UVs) ───────────────────────────────────
         uv_layers = {l.name: l for l in mesh.uv_layers}
         artist_name = next((n for n in ('UVMap', 'UVmap_0') if n in uv_layers),
                            None)
         if artist_name is None:
             results.append(('WARN',
-                "No 'UVMap' / 'UVmap_0' layer found â€” artist texture UVs "
+                "No 'UVMap' / 'UVmap_0' layer found — artist texture UVs "
                 "missing. Curve-to-Mesh in the tubes geonode normally "
                 "creates 'UVMap' automatically."))
         else:
             results.append(('OK', f"Artist UV layer '{artist_name}' present "
                                    f"({len(uv_layers[artist_name].data)} loops)."))
 
-        # â”€â”€ UVMap2 = (branch_base_z, tree_max_z), CORNER FLOAT2 â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── UVMap2 = (branch_base_z, tree_max_z), CORNER FLOAT2 ─────────
         uv2_attr = mesh.attributes.get('UVMap2')
         if uv2_attr is None:
             results.append(('FAIL',
-                "UVMap2 is missing â€” run the Branch UV Geonode."))
+                "UVMap2 is missing — run the Branch UV Geonode."))
         else:
             if uv2_attr.domain != 'CORNER' or uv2_attr.data_type != 'FLOAT2':
                 results.append(('FAIL',
@@ -724,7 +906,7 @@ def _validate_tree_uvs(obj, context):
                             results.append(('WARN',
                                 f"UVMap2.V ({v_unique[0]:.4f}) does not "
                                 f"match mesh max Z ({mesh_max_z:.4f}); "
-                                f"Î”={delta:.4f}."))
+                                f"Δ={delta:.4f}."))
                 # U should equal branch_base_z at the corresponding loop.
                 base_z_vals, base_z_domain = _get_attr_values(mesh,
                                                               'branch_base_z')
@@ -733,7 +915,7 @@ def _validate_tree_uvs(obj, context):
                 if base_z_per_loop is None:
                     results.append(('WARN',
                         "branch_base_z absent or on a non-projectable "
-                        "domain â€” can't verify UVMap2.U matches the "
+                        "domain — can't verify UVMap2.U matches the "
                         "per-island pivot. UV geonode falls back to "
                         "vertex Z when this attr is missing."))
                 else:
@@ -757,13 +939,13 @@ def _validate_tree_uvs(obj, context):
                             f"(tolerance 5e-3)."))
                 # Per-branch_id constancy of U (if branch_id present and
                 # projectable). branch_id may end up on POINT, EDGE, or
-                # CORNER depending on what survived Meshâ†’Curveâ†’Mesh.
+                # CORNER depending on what survived Mesh→Curve→Mesh.
                 bid_vals, bid_domain = _get_attr_values(mesh, 'branch_id')
                 bid_per_loop = _resolve_per_loop(bid_vals, bid_domain, mesh)
                 if bid_per_loop is None:
                     results.append(('WARN',
                         "branch_id absent or on a non-projectable "
-                        "domain â€” skipping per-island U constancy."))
+                        "domain — skipping per-island U constancy."))
                 else:
                     results.append(('OK',
                         f"branch_id found on {bid_domain} domain."))
@@ -780,18 +962,18 @@ def _validate_tree_uvs(obj, context):
                             f"{len(by_branch)} branch(es)."))
                     else:
                         # Show first few offending islands for diagnosis.
-                        sample = ", ".join(f"id={b}â†’{sorted(by_branch[b])}"
+                        sample = ", ".join(f"id={b}→{sorted(by_branch[b])}"
                                            for b in list(bad)[:3])
                         results.append(('FAIL',
                             f"UVMap2.U varies within {len(bad)} of "
                             f"{len(by_branch)} branch_id island(s). "
                             f"Examples: {sample}"))
 
-        # â”€â”€ UVMap3 = (0, 1) constant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── UVMap3 = (0, 1) constant ────────────────────────────────────
         uv3_attr = mesh.attributes.get('UVMap3')
         if uv3_attr is None:
             results.append(('WARN',
-                "UVMap3 absent â€” placeholder (0,1) not written."))
+                "UVMap3 absent — placeholder (0,1) not written."))
         else:
             if uv3_attr.domain != 'CORNER' or uv3_attr.data_type != 'FLOAT2':
                 results.append(('FAIL',
@@ -810,7 +992,7 @@ def _validate_tree_uvs(obj, context):
                         f"[{min(u3):.4f},{max(u3):.4f}], V range "
                         f"[{min(v3):.4f},{max(v3):.4f}]."))
 
-        # â”€â”€ UVMap1 (repurposed as per-branch pivot X / Y) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── UVMap1 (repurposed as per-branch pivot X / Y) ────────────
         lmap_attr = mesh.attributes.get('UVMap1')
         if lmap_attr is None:
             # Some files name it without the camel-case; tolerate that.
@@ -820,7 +1002,7 @@ def _validate_tree_uvs(obj, context):
                     break
         if lmap_attr is None:
             results.append(('WARN',
-                "No UVMap1 (per-branch pivot X/Y) â€” rebuild Branch "
+                "No UVMap1 (per-branch pivot X/Y) — rebuild Branch "
                 "UV Geonode from source."))
         elif lmap_attr.data_type != 'FLOAT2' or lmap_attr.domain != 'CORNER':
             results.append(('FAIL',
@@ -836,7 +1018,7 @@ def _validate_tree_uvs(obj, context):
                 f"{len(lv_unique)} V values "
                 f"(should match branch count)."))
 
-        # â”€â”€ Color "Attribute" = (0, 0, 0, 1) on the wood â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Color "Attribute" = (0, 0, 0, 1) on the wood ─────────────────
         color_attr = mesh.attributes.get('Attribute')
         if color_attr is None:
             # Fall back to first color attribute if a non-standard name.
@@ -849,7 +1031,7 @@ def _validate_tree_uvs(obj, context):
                     f"'{color_attr.name}' for color checks."))
         if color_attr is None:
             results.append(('FAIL',
-                "No color attribute found â€” wind mask not written."))
+                "No color attribute found — wind mask not written."))
         else:
             cols = [d.color for d in color_attr.data]
             r_max = max(c[0] for c in cols) if cols else 0
@@ -858,24 +1040,26 @@ def _validate_tree_uvs(obj, context):
             b_max = max(c[2] for c in cols) if cols else 0
             a_min = min(c[3] for c in cols) if cols else 1
             a_max = max(c[3] for c in cols) if cols else 1
-            # Current encoding: wood Color = (depth_tier, 0, 0, 1).
-            # R carries the wind branch tier (4 discrete levels:
-            # 0.0, 0.333, 0.667, 1.0). G, B = 0; A = 1.
-            BYTE_EPS = 1.5 / 255.0  # 1-step byte quantization slack
+            # Current encoding for the WOOD mesh:
+            #   trunk  (depth 0)   : (0.0001, 0, 0, 1)
+            #   branch (depth ≥ 1) : (0.001,  0, 0, branch_t)
+            BYTE_EPS = 1.5 / 255.0
             g_min = min(c[1] for c in cols) if cols else 0
-            r_unique = sorted(set(round(c[0], 3) for c in cols))
-            if len(r_unique) <= 6:
+            r_unique = sorted(set(round(c[0], 4) for c in cols))
+            valid_r = lambda v: (_approx_eq(v, 0.0001, 5e-4)
+                                 or _approx_eq(v, 0.001,  5e-4)
+                                 or v <= BYTE_EPS)
+            if all(valid_r(v) for v in r_unique):
+                trunk_loops  = sum(1 for c in cols if c[0] < 0.0005)
+                branch_loops = len(cols) - trunk_loops
                 results.append(('OK',
-                    f"Color R (wind tier): {len(r_unique)} discrete "
-                    f"value(s) {r_unique}."))
-                if len(r_unique) > 4:
-                    results.append(('WARN',
-                        f"Color R has {len(r_unique)} levels â€” expected "
-                        f"â‰¤4 (trunk/d1/d2/dâ‰¥3)."))
+                    f"Color R: {trunk_loops} trunk loops (R≈0.0001) + "
+                    f"{branch_loops} branch loops (R≈0.001)."))
             else:
                 results.append(('WARN',
-                    f"Color R has {len(r_unique)} distinct values "
-                    f"(expected up to 4 wind tiers)."))
+                    f"Color R has unexpected values: "
+                    f"{r_unique[:8]}{'…' if len(r_unique) > 8 else ''}. "
+                    f"Expected just 0.0001 and 0.001."))
             if g_max > BYTE_EPS:
                 results.append(('WARN',
                     f"Color G is not 0 ([{g_min:.4f},{g_max:.4f}])."))
@@ -886,12 +1070,12 @@ def _validate_tree_uvs(obj, context):
                     f"Color B is not 0 ([{b_min:.4f},{b_max:.4f}])."))
             else:
                 results.append(('OK', "Color B = 0."))
-            if not (_approx_eq(a_min, 1.0, BYTE_EPS)
-                    and _approx_eq(a_max, 1.0, BYTE_EPS)):
-                results.append(('WARN',
-                    f"Color A â‰  1 ([{a_min:.4f},{a_max:.4f}])."))
-            else:
-                results.append(('OK', "Color A = 1."))
+            # Alpha: trunk + tier-2+ → 1; tier-1 ramps 0→1 along branch.
+            a_levels = len(set(round(c[3], 2) for c in cols))
+            results.append(('OK',
+                f"Color A range [{a_min:.4f}, {a_max:.4f}], "
+                f"{a_levels} distinct level(s) — tier-1 branches ramp "
+                f"alpha along branch_t; trunk and tier-2+ = 1."))
             # Wind-mask underground check removed: wood no longer carries
             # a per-vertex wind mask in Color.B (the reference doesn't,
             # and our updated UV geonode matches). The wood shader masks
@@ -904,7 +1088,7 @@ def _validate_tree_uvs(obj, context):
 
 class ARANTOOLS_OT_TreeValidateUVs(Operator):
     """Walk the FINAL evaluated mesh of the selected tree (after all
-modifiers â€” i.e. after the tubes + UV geonodes have run) and verify the
+modifiers — i.e. after the tubes + UV geonodes have run) and verify the
 SpeedTree-style encoding is correct: UVMap2 = (branch_base_z,
 tree_max_z), UVMap3 = (0,1), and Color = (0, 0, wind_mask, 1) with B=0
 on underground verts. Reports OK / WARN / FAIL per check, summary to the

@@ -31,7 +31,7 @@ _PANEL_CATEGORY = 'Aran Tools'
 
 
 # ============================================================================
-# Main panel â€” single panel with icon tab switcher
+# Main panel — single panel with icon tab switcher
 # ============================================================================
 
 class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
@@ -54,7 +54,7 @@ class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
                 try:
                     importlib.reload(sys.modules[mod_name])
                 except Exception as e:
-                    print(f"[AranTools] reload warning â€“ {mod_name}: {e}")
+                    print(f"[AranTools] reload warning – {mod_name}: {e}")
 
             addon_utils.disable("arantools", default_set=False)
             addon_utils.enable("arantools", default_set=False)
@@ -73,7 +73,7 @@ _TOOL_REGISTRY = [
     ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform',  True),
     ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger', False),
     ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind',      False),
-    ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers â€” requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
+    ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
     ('island_flatten',   'Flatten Island Weights',   'Average deform bone weights across each mesh island so the island bends as a rigid unit', 'RIGGING', 'MOD_SMOOTH', '_draw_t_island_flatten',   False),
     ('smart_transfer', 'Smart Weight Transfer',  'Copy vertex weights from a source mesh with interpolation options',               'WEIGHT',       'MOD_DATA_TRANSFER',  '_draw_t_smart_transfer', False),
     ('sync_vgroups',   'Sync Vertex Groups',     'Add missing vertex groups from the armature to the active mesh',                  'WEIGHT',       'GROUP_VERTEX',       '_draw_t_sync_vgroups',   True),
@@ -121,7 +121,7 @@ class ARANTOOLS_PT_main(Panel):
         layout = self.layout
         scene = context.scene
 
-        # â”€â”€ Search box â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Search box ────────────────────────────────────────────────────
         row = layout.row(align=True)
         row.prop(scene, 'arantools_search', text="", icon='VIEWZOOM')
         if scene.arantools_search:
@@ -132,7 +132,7 @@ class ARANTOOLS_PT_main(Panel):
             self._draw_search(layout, scene, context, search)
             return
 
-        # â”€â”€ Active tab name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Active tab name ───────────────────────────────────────────────
         tab_info = {
             'RIGGING':      ('Rigging',      'ARMATURE_DATA'),
             'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
@@ -148,7 +148,7 @@ class ARANTOOLS_PT_main(Panel):
 
         main_row = layout.row()
 
-        # â”€â”€ Vertical icon tabs on the left with color coding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Vertical icon tabs on the left with color coding ──────────────
         tab_col = main_row.column(align=True)
         tab_col.scale_x = 1.3
         tab_col.scale_y = 1.3
@@ -173,7 +173,7 @@ class ARANTOOLS_PT_main(Panel):
         tab_col.separator()
         tab_col.operator("arantools.reload_addon", text="", icon='FILE_REFRESH')
 
-        # â”€â”€ Content area â€” collapsible tool sections â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Content area — collapsible tool sections ──────────────────────
         content_col = main_row.column()
         active_tab = scene.arantools_active_tab
         for tool_id, tool_name, tool_desc, tool_tab, tool_icon, draw_method, is_small in _TOOL_REGISTRY:
@@ -183,7 +183,7 @@ class ARANTOOLS_PT_main(Panel):
             if expanded:
                 getattr(self, draw_method)(box, context)
 
-    # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _section(self, layout, scene, tool_id, label, icon, is_small=False):
         """Draw a section header. Returns (box, is_expanded).
@@ -230,7 +230,7 @@ class ARANTOOLS_PT_main(Panel):
         if not found:
             layout.label(text="No tools match your search.", icon='INFO')
 
-    # â”€â”€ Individual tool content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Individual tool content ───────────────────────────────────────────────
 
     def _draw_t_select_deform(self, layout, context):
         layout.operator("arantools.select_deform_bones", icon='BONE_DATA')
@@ -264,12 +264,12 @@ class ARANTOOLS_PT_main(Panel):
     def _draw_t_join_bind(self, layout, context):
         props = context.scene.arantools_adv_rigging
         col = layout.column(align=True)
-        col.label(text="Step 1 â€” Join", icon='OBJECT_DATAMODE')
+        col.label(text="Step 1 — Join", icon='OBJECT_DATAMODE')
         col.label(text="Select costume meshes in viewport first", icon='MOUSE_LMB')
         col.prop(props, "target_collection", text="Output Collection")
         col.operator("arantools.join_targets", text="Join Selected into One Mesh", icon='OBJECT_DATAMODE')
         col.separator()
-        col.label(text="Step 2 â€” Bind", icon='ARMATURE_DATA')
+        col.label(text="Step 2 — Bind", icon='ARMATURE_DATA')
         col.label(text="Make the joined mesh active first", icon='MOUSE_LMB')
         col.prop(props, "source_mesh", text="Rigged Body")
         col.prop(props, "mapping_method", text="Vertex Mapping")
@@ -389,14 +389,14 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "export_folder")
         col.separator()
 
-        # â”€â”€ Mesh naming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Mesh naming ───────────────────────────────────────────────────
         col.label(text="Mesh Naming:", icon='OBJECT_DATAMODE')
         col.prop(props, "remove_str", text="Remove")
         row = col.row(align=True)
         row.prop(props, "prefix_str", text="Prefix")
         row.prop(props, "suffix_str", text="Suffix")
 
-        # â”€â”€ Mesh preview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Mesh preview ──────────────────────────────────────────────────
         selected_meshes = [
             obj for obj in context.selected_objects
             if obj != props.target_armature and obj.type == 'MESH'
@@ -418,7 +418,7 @@ class ARANTOOLS_PT_main(Panel):
         col2 = layout.column(align=True)
         col2.separator()
 
-        # â”€â”€ Anim naming â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Anim naming ───────────────────────────────────────────────────
         col2.label(text="Anim Naming:", icon='ANIM')
         col2.prop(props, "anim_remove_str", text="Remove")
         row = col2.row(align=True)
@@ -426,7 +426,7 @@ class ARANTOOLS_PT_main(Panel):
         row.prop(props, "anim_suffix_str", text="Suffix")
         col2.prop(props, "anim_only_active")
 
-        # â”€â”€ Anim preview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Anim preview ──────────────────────────────────────────────────
         arm = props.target_armature
         if arm is None:
             layout.label(text="Pick an armature to preview animations.", icon='INFO')
@@ -454,7 +454,7 @@ class ARANTOOLS_PT_main(Panel):
             if len(anim_actions) > 1:
                 preview_box.label(text="+ " + str(len(anim_actions) - 1) + " more action(s)")
 
-        # â”€â”€ Export buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Export buttons ────────────────────────────────────────────────
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.enabled = bool(props.target_armature)
@@ -467,7 +467,7 @@ class ARANTOOLS_PT_main(Panel):
         props = context.scene.arantools_arp_export
         col = layout.column(align=True)
 
-        # â”€â”€ Dedicated folder for this tool â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Dedicated folder for this tool ────────────────────────────────
         col.prop(props, "export_sets_folder", text="Folder")
         if props.target_armature is None:
             col.label(text="Set Armature in ARP Batch Export above.",
@@ -477,7 +477,7 @@ class ARANTOOLS_PT_main(Panel):
                       icon='ARMATURE_DATA')
         col.separator()
 
-        # â”€â”€ Add buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Add buttons ───────────────────────────────────────────────────
         add_row = col.row(align=True)
         add_row.scale_y = 1.2
         add_row.operator("arantools.expset_add_from_selection",
@@ -487,18 +487,18 @@ class ARANTOOLS_PT_main(Panel):
 
         if not props.export_sets:
             col.separator()
-            col.label(text="No sets yet. Select meshes â†’ '+ From Selection'.",
+            col.label(text="No sets yet. Select meshes → '+ From Selection'.",
                       icon='INFO')
             return
 
-        # â”€â”€ Duplicate-filename detector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Duplicate-filename detector ───────────────────────────────────
         name_counts = {}
         for s in props.export_sets:
             nm = _export._clean_relpath(s.filename)
             if nm:
                 name_counts[nm] = name_counts.get(nm, 0) + 1
 
-        # â”€â”€ One box per set â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── One box per set ───────────────────────────────────────────────
         for i, eset in enumerate(props.export_sets):
             box = layout.box()
             header = box.row(align=True)
@@ -517,7 +517,7 @@ class ARANTOOLS_PT_main(Panel):
             # Preview: cleaned filename
             clean = _export._clean_relpath(eset.filename)
             if not clean:
-                body.label(text="Empty filename â€” set will be skipped.",
+                body.label(text="Empty filename — set will be skipped.",
                            icon='ERROR')
             elif name_counts.get(clean, 0) > 1:
                 body.label(text=f"Org:  {eset.filename}", icon='OBJECT_DATAMODE')
@@ -532,11 +532,11 @@ class ARANTOOLS_PT_main(Panel):
             if valid:
                 names = ", ".join(m.name for m in valid[:6])
                 if len(valid) > 6:
-                    names += f" â€¦ (+{len(valid) - 6})"
+                    names += f" … (+{len(valid) - 6})"
                 body.label(text=f"Meshes ({len(valid)}): {names}",
                            icon='MESH_DATA')
             else:
-                body.label(text="No meshes yet â€” pick selection.", icon='INFO')
+                body.label(text="No meshes yet — pick selection.", icon='INFO')
             if missing:
                 body.label(text=f"{missing} deleted reference(s).", icon='ERROR')
 
@@ -560,7 +560,7 @@ class ARANTOOLS_PT_main(Panel):
                                  text="Export This Set", icon='EXPORT')
             op.index = i
 
-        # â”€â”€ Batch button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Batch button ──────────────────────────────────────────────────
         layout.separator()
         big = layout.row()
         big.scale_y = 1.4
@@ -570,7 +570,7 @@ class ARANTOOLS_PT_main(Panel):
         layout.label(text="Overwrites existing files. Requires Auto-Rig Pro.",
                      icon='INFO')
 
-        # â”€â”€ Animation Export sub-section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Animation Export sub-section ──────────────────────────────────
         layout.separator(factor=2.0)
         anim_header = layout.row()
         anim_header.label(text="Animation Export", icon='ANIM')
@@ -602,7 +602,7 @@ class ARANTOOLS_PT_main(Panel):
             rows=6,
         )
 
-        # â”€â”€ Single-line preview + button for full popup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Single-line preview + button for full popup ───────────────────
         enabled_items = [it for it in props.anim_export_items
                          if it.enabled and it.action is not None]
         prev_col = layout.column(align=True)
@@ -633,7 +633,7 @@ class ARANTOOLS_PT_main(Panel):
         obj = context.active_object
         col = layout.column(align=True)
 
-        # â”€â”€ Object Mode: offer to spawn a fresh skeleton â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Object Mode: offer to spawn a fresh skeleton ──────────────────
         if obj is None or obj.type != 'MESH':
             col.label(text="No mesh active.", icon='INFO')
             col.operator("arantools.tree_new_skeleton",
@@ -660,8 +660,8 @@ class ARANTOOLS_PT_main(Panel):
                           text="Clear Attributes", icon='X')
             return
 
-        # â”€â”€ Edit Mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Setup button at the TOP â€” the artist's primary action.
+        # ── Edit Mode ─────────────────────────────────────────────────────
+        # Setup button at the TOP — the artist's primary action.
         props = context.scene.arantools_tree_branch
         root_idx = _tb.get_root_vert_index(obj.data)
 
@@ -674,7 +674,7 @@ class ARANTOOLS_PT_main(Panel):
         if root_idx is None:
             top.label(text="Designate a root vertex first.", icon='INFO')
 
-        # â”€â”€ Root vertex: the persistent trunk base â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Root vertex: the persistent trunk base ────────────────────────
         rbox = layout.box()
         if root_idx is None:
             rbox.label(text="Root: (not set)", icon='X')
@@ -689,7 +689,7 @@ class ARANTOOLS_PT_main(Panel):
                      text="Select", icon='RESTRICT_SELECT_OFF')
         sub.operator("arantools.tree_clear_root", text="", icon='X')
 
-        # â”€â”€ Collapsible settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Collapsible settings ──────────────────────────────────────────
         settings = layout.box()
         header = settings.row(align=True)
         header.prop(props, "show_settings",
@@ -703,9 +703,9 @@ class ARANTOOLS_PT_main(Panel):
             settings.label(text="Child branches inherit from the parent's "
                                 "radius at the junction.", icon='INFO')
 
-            # Three per-category taper curves (X = 0 base â†’ 1 tip)
+            # Three per-category taper curves (X = 0 base → 1 tip)
             settings.separator()
-            settings.label(text="Taper Curves   (X: base â†’ tip,  Y: radius mul)",
+            settings.label(text="Taper Curves   (X: base → tip,  Y: radius mul)",
                            icon='IPO_EASE_IN_OUT')
             any_missing = any(_tb.get_taper_curve_node(n) is None
                               for n in (_tb.CURVE_TRUNK, _tb.CURVE_BRANCH,
@@ -728,9 +728,9 @@ class ARANTOOLS_PT_main(Panel):
             prow.prop(props, "preserve_radius")
             prow.prop(props, "preserve_tilt")
 
-        # â”€â”€ Workflow hint + Clear â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Workflow hint + Clear ─────────────────────────────────────────
         layout.label(
-            text="Extrude verts â†’ Set Root â†’ Setup. Root is sticky.",
+            text="Extrude verts → Set Root → Setup. Root is sticky.",
             icon='INFO')
         layout.operator("arantools.tree_clear_branch_skeleton",
                         text="Clear Attributes", icon='X')
@@ -768,7 +768,7 @@ class ARANTOOLS_PT_main(Panel):
         if missing:
             col.label(text=f"Missing attributes: {', '.join(missing)}",
                       icon='ERROR')
-            col.label(text="Run Branch Skeleton â†’ Setup first.", icon='INFO')
+            col.label(text="Run Branch Skeleton → Setup first.", icon='INFO')
 
         ng = bpy.data.node_groups.get(_tubes.GEONODE_NAME)
         if ng is None:
@@ -792,10 +792,10 @@ class ARANTOOLS_PT_main(Panel):
 
         info = layout.box()
         info.label(text="Output:", icon='MESH_CYLINDER')
-        info.label(text="â€¢ One tube per branch, joined by branch_id")
-        info.label(text="â€¢ Tip caps closed, base caps open")
-        info.label(text="â€¢ Auto UV map 'UVMap' (editable after apply)")
-        info.label(text="â€¢ Skeleton attrs carry through for the UV geonode",
+        info.label(text="• One tube per branch, joined by branch_id")
+        info.label(text="• Tip caps closed, base caps open")
+        info.label(text="• Auto UV map 'UVMap' (editable after apply)")
+        info.label(text="• Skeleton attrs carry through for the UV geonode",
                    icon='INFO')
 
     def _draw_t_tree_uv(self, layout, context):
@@ -833,12 +833,14 @@ class ARANTOOLS_PT_main(Panel):
         col.separator()
         info = layout.box()
         info.label(text="Wood outputs (FACE_CORNER):", icon='UV_DATA')
-        info.label(text="â€¢ UVMap2 = (branch_base_z, tree_max_z)")
-        info.label(text="â€¢ UVMap3 = (0, 1)   (placeholder)")
-        info.label(text="â€¢ UVMap1 = (branch_base_x, branch_base_y + 1)")
-        info.label(text="â€¢ Attribute = (0.0|0.1, 0, 0, 1)  trunk/branch tier")
+        info.label(text="• UVMap2 = (branch_base_z, tree_max_z)")
+        info.label(text="• UVMap3 = (0, 1)   (placeholder)")
+        info.label(text="• UVMap1 = (branch_base_x, branch_base_y)")
+        info.label(text="• Attribute:")
+        info.label(text="    trunk    = (0.0001, 0, 0, 1)")
+        info.label(text="    branch   = (0.001,  0, 0, branch_t)")
 
-        # â”€â”€ Leaves UV geonode (separate node group, separate modifier) â”€â”€
+        # ── Leaves UV geonode (separate node group, separate modifier) ──
         layout.separator()
         leaves = layout.column(align=True)
         leaves.label(text="Leaves UV Geonode", icon='OUTLINER_OB_GREASEPENCIL')
@@ -863,11 +865,11 @@ class ARANTOOLS_PT_main(Panel):
         linfo = layout.box()
         linfo.label(text="Leaves outputs (sampled from nearest trunk tip):",
                     icon='UV_DATA')
-        linfo.label(text="â€¢ UVMap2 = (tip.branch_base_z, tree_max_z)")
-        linfo.label(text="â€¢ UVMap3 = (0, 1)")
-        linfo.label(text="â€¢ UVMap1 = (tip.bx, tip.by + 1)")
-        linfo.label(text="â€¢ Attribute = (0.001, 0.001, wind_amp, 1)")
-        linfo.label(text="â€¢ leaf_alpha (FACE FLOAT) = random per face")
+        linfo.label(text="• UVMap2 = (tip.branch_base_z, tree_max_z)")
+        linfo.label(text="• UVMap3 = (0, 1)")
+        linfo.label(text="• UVMap1 = (tip.bx, tip.by)")
+        linfo.label(text="• Attribute = (0.001, 0.001, random_B, 1)")
+        linfo.label(text="    B is a per-face random in [0, 1]")
         linfo.label(text="Set 'Trunk' object input on the modifier!",
                     icon='INFO')
 
@@ -880,8 +882,13 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "output_filename", text="File")
         col.prop(props, "copy_to_clipboard")
         col.separator()
+        csv_row = col.column(align=True)
+        csv_row.prop(props, "export_loop_csv")
+        if props.export_loop_csv:
+            csv_row.prop(props, "csv_max_rows", text="Row Limit (0 = all)")
+        col.separator()
 
-        # Status line â€” how many meshes the operator will hit
+        # Status line — how many meshes the operator will hit
         if props.scope == 'SELECTED':
             count = sum(1 for o in context.selected_objects if o.type == 'MESH')
             if count == 0:
@@ -901,7 +908,7 @@ class ARANTOOLS_PT_main(Panel):
         col.label(text="Reports UV ranges, vcolor distributions, shaders, mods.",
                   icon='INFO')
 
-        # â”€â”€ UV validator: checks the final evaluated mesh matches the
+        # ── UV validator: checks the final evaluated mesh matches the
         # SpeedTree-style encoding the geonodes are supposed to produce.
         layout.separator()
         vbox = layout.box()
@@ -924,7 +931,7 @@ class ARANTOOLS_PT_main(Panel):
         props = context.scene.arantools_mod_sync
         col   = layout.column(align=True)
 
-        # â”€â”€ Source object â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Source object ──────────────────────────────────────────────────
         col.label(text="Source Object:", icon='OBJECT_DATA')
         row = col.row(align=True)
         row.prop(props, "source_object", text="")
@@ -932,7 +939,7 @@ class ARANTOOLS_PT_main(Panel):
                      text="Save Stack", icon='IMPORT')
         col.separator()
 
-        # â”€â”€ Modifier checklist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Modifier checklist ─────────────────────────────────────────────
         if props.modifier_items:
             col.label(text="Modifiers to Copy:", icon='MODIFIER')
             mod_box = col.box()
@@ -959,8 +966,8 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
 
-        # â”€â”€ Last targets / reapply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Only show when a stack is loaded AND targets exist â€” the button
+        # ── Last targets / reapply ─────────────────────────────────────────
+        # Only show when a stack is loaded AND targets exist — the button
         # silently fails without both, so don't show it in a broken state.
         if props.modifier_items:
             if props.last_targets:
@@ -1039,7 +1046,7 @@ class ARANTOOLS_PT_main(Panel):
         arm = props.armature
         col.separator()
 
-        # â”€â”€ Active action status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Active action status ─────────────────────────────────────────
         if arm.animation_data and arm.animation_data.action:
             act = arm.animation_data.action
             info = col.row(align=True)
@@ -1053,7 +1060,7 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
 
-        # â”€â”€ Action list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Action list ──────────────────────────────────────────────────
         col.label(text="Actions:", icon='OUTLINER_DATA_GP_LAYER')
         col.template_list(
             "ARANTOOLS_UL_AnimOrg_Actions", "",
@@ -1067,12 +1074,12 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
 
-        # â”€â”€ New action â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── New action ───────────────────────────────────────────────────
         col.label(text="Create New Action:", icon='ADD')
         col.prop(props, "new_action_name", text="")
         parsed_new = _anim._parse_duration(props.new_action_name)
         if parsed_new is not None:
-            col.label(text=f"Timeline will be 1 â†’ {parsed_new}", icon='TIME')
+            col.label(text=f"Timeline will be 1 → {parsed_new}", icon='TIME')
         else:
             col.label(text="Append '_NNN' to set timeline (e.g. _400).", icon='INFO')
         create_row = col.row()
@@ -1084,7 +1091,7 @@ class ARANTOOLS_PT_main(Panel):
         props = context.scene.arantools_curve_smooth
         col   = layout.column(align=True)
 
-        # â”€â”€ Channels + per-axis locks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Channels + per-axis locks ─────────────────────────────────────
         col.label(text="Channels  /  Axes:", icon='DECORATE_KEYFRAME')
 
         for chan_prop, axes_prop, label, icon in (
@@ -1099,14 +1106,14 @@ class ARANTOOLS_PT_main(Panel):
             axis_row.prop(props, axes_prop, text="", toggle=True)
         col.separator()
 
-        # â”€â”€ Spring parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Spring parameters ─────────────────────────────────────────────
         col.label(text="Spring:", icon='IPO_BOUNCE')
         col.prop(props, "stiffness", slider=True)
         col.prop(props, "damping",   slider=True)
         col.prop(props, "blend",     slider=True, text="Strength")
         col.separator()
 
-        # â”€â”€ Stop preservation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Stop preservation ─────────────────────────────────────────────
         col.label(text="Stop Points:", icon='SNAP_MIDPOINT')
         col.prop(props, "preserve_stops")
         sub = col.column(align=True)
@@ -1114,11 +1121,11 @@ class ARANTOOLS_PT_main(Panel):
         sub.prop(props, "stop_tolerance")
         col.separator()
 
-        # â”€â”€ Advanced â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Advanced ──────────────────────────────────────────────────────
         col.prop(props, "substeps")
         col.separator()
 
-        # â”€â”€ Decimate (uses Blender's graph.decimate) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Decimate (uses Blender's graph.decimate) ──────────────────────
         col.label(text="Decimate:", icon='SHARPCURVE')
         col.prop(props, "decimate_after")
         sub = col.column(align=True)
@@ -1130,7 +1137,7 @@ class ARANTOOLS_PT_main(Panel):
             sub.prop(props, "decimate_ratio", slider=True)
         col.separator()
 
-        # â”€â”€ Apply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Apply ─────────────────────────────────────────────────────────
         if context.mode != 'POSE':
             col.label(text="Enter Pose Mode to run.", icon='ERROR')
         elif not (context.selected_pose_bones or []):
@@ -1146,27 +1153,27 @@ class ARANTOOLS_PT_main(Panel):
         scene = context.scene
         col   = layout.column(align=True)
 
-        # â”€â”€ Timing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Timing ────────────────────────────────────────────────────────
         col.label(text="Timing:", icon='TIME')
         col.prop(scene, 'arantools_frame_length',   text='Last Frame')
         col.prop(scene, 'arantools_blend_duration', text='Blend In/Out')
         col.separator()
 
-        # â”€â”€ Rotation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Rotation ──────────────────────────────────────────────────────
         col.label(text="Rotation:", icon='ORIENTATION_GIMBAL')
         col.prop(scene, 'arantools_rotation_strength', text='Strength', slider=True)
         col.prop(scene, 'arantools_rotation_scale',
-                 text='Time Scale  (â†‘ = slower)', slider=True)
+                 text='Time Scale  (↑ = slower)', slider=True)
         col.separator()
 
-        # â”€â”€ Location â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Location ──────────────────────────────────────────────────────
         col.label(text="Location:", icon='OBJECT_ORIGIN')
         col.prop(scene, 'arantools_location_strenght', text='Strength', slider=True)
         col.prop(scene, 'arantools_location_scale',
-                 text='Time Scale  (â†‘ = slower)', slider=True)
+                 text='Time Scale  (↑ = slower)', slider=True)
         col.separator()
 
-        # â”€â”€ Advanced â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Advanced ──────────────────────────────────────────────────────
         adv_box = col.box()
         adv_row = adv_box.row(align=True)
         adv_row.prop(scene, 'arantools_advanced_options',
@@ -1176,7 +1183,7 @@ class ARANTOOLS_PT_main(Panel):
         if scene.arantools_advanced_options:
             sub = adv_box.column(align=True)
 
-            # â”€â”€ Rotation per-axis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── Rotation per-axis ──────────────────────────────────────
             sub.label(text="Rotation Axis:", icon='ORIENTATION_GIMBAL')
             row = sub.row(align=True)
             row.label(text="Strength")
@@ -1188,7 +1195,7 @@ class ARANTOOLS_PT_main(Panel):
                      text='', slider=True)
             sub.separator()
 
-            # â”€â”€ Location per-axis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── Location per-axis ──────────────────────────────────────
             sub.label(text="Location Axis:", icon='OBJECT_ORIGIN')
             row = sub.row(align=True)
             row.label(text="Strength")
@@ -1200,16 +1207,16 @@ class ARANTOOLS_PT_main(Panel):
                      text='', slider=True)
             sub.separator()
 
-            # â”€â”€ Divisors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── Divisors ───────────────────────────────────────────────
             sub.label(text="Divisors:", icon='DRIVER_TRANSFORM')
             sub.prop(scene, 'arantools_location_strength_divisor',
-                     text='Loc Strength Ã·')
+                     text='Loc Strength ÷')
             sub.prop(scene, 'arantools_scale_divisor',
-                     text='Scale Ã·')
+                     text='Scale ÷')
 
         col.separator()
 
-        # â”€â”€ Apply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Apply ─────────────────────────────────────────────────────────
         col.label(text="Apply:", icon='FORCE_TURBULENCE')
         apply_row = col.row(align=True)
         apply_row.scale_y = 1.3
@@ -1223,6 +1230,86 @@ class ARANTOOLS_PT_main(Panel):
 # ============================================================================
 # Registration
 # ============================================================================
+
+_TOPBAR_DRAW_KEY = "arantools_export_for_unreal_topbar_draw"
+
+
+def _draw_export_for_unreal_topbar(self, context):
+    """Always-accessible 'Export for Unreal' button in Blender's topbar.
+
+    Only draws if the underlying operator `object.exportforunreal` is
+    actually registered (the Send-to-Unreal addon may not be enabled in
+    every file/install). When missing we silently skip the button rather
+    than throwing during topbar draw."""
+    op_exists = hasattr(bpy.types, "OBJECT_OT_exportforunreal") or \
+                "exportforunreal" in dir(bpy.ops.object)
+    if not op_exists:
+        return
+    self.layout.separator(factor=0.5)
+    self.layout.operator("object.exportforunreal",
+                         text="Export for Unreal",
+                         icon='EXPORT')
+
+
+def _purge_orphan_topbar_buttons():
+    """Walk the topbar header's internal draw-function list and remove
+    any leftover draw functions whose __name__ matches ours. This handles
+    stale duplicates left over from prior reloads where the function
+    reference was lost (the public remove() API needs the exact function
+    object, which we no longer have for those orphans)."""
+    hdr = bpy.types.TOPBAR_HT_upper_bar
+    target_name = _draw_export_for_unreal_topbar.__name__
+    # Blender stores appended draw functions on the bound draw method.
+    # Attribute name has varied across versions; check the known ones.
+    for attr in ('_draw_funcs', '_draw_funcs_post', '_draw_funcs_pre'):
+        funcs = getattr(hdr.draw, attr, None)
+        if not funcs:
+            continue
+        for fn in list(funcs):
+            if getattr(fn, '__name__', '') == target_name:
+                try:
+                    hdr.remove(fn)
+                except (ValueError, AttributeError):
+                    pass
+
+
+def _install_topbar_button():
+    """Register the topbar button — idempotent across Reload Scripts.
+
+    The trick: `TOPBAR_HT_upper_bar.remove(fn)` only works if `fn` is the
+    exact same function OBJECT that was previously appended. After a
+    script reload, the new register() has a different module-level fn
+    reference, so `remove()` would fail to find the old one and we'd
+    end up with duplicate buttons stacking up.
+
+    We keep the stable reference in `bpy.app.driver_namespace` (a persistent
+    dict that survives module reload), so each new register can find and
+    remove the previous instance before appending the current one."""
+    _purge_orphan_topbar_buttons()
+    old_fn = bpy.app.driver_namespace.get(_TOPBAR_DRAW_KEY)
+    if old_fn is not None:
+        try:
+            bpy.types.TOPBAR_HT_upper_bar.remove(old_fn)
+        except (ValueError, AttributeError):
+            pass
+    bpy.types.TOPBAR_HT_upper_bar.append(_draw_export_for_unreal_topbar)
+    bpy.app.driver_namespace[_TOPBAR_DRAW_KEY] = _draw_export_for_unreal_topbar
+
+
+def _uninstall_topbar_button():
+    fn = bpy.app.driver_namespace.pop(_TOPBAR_DRAW_KEY, None)
+    if fn is not None:
+        try:
+            bpy.types.TOPBAR_HT_upper_bar.remove(fn)
+        except (ValueError, AttributeError):
+            pass
+    # Also try the current module-level reference, in case driver_namespace
+    # was wiped between scripts reloads.
+    try:
+        bpy.types.TOPBAR_HT_upper_bar.remove(_draw_export_for_unreal_topbar)
+    except (ValueError, AttributeError):
+        pass
+
 
 classes = [
     ARANTOOLS_OT_reload_addon,
@@ -1276,8 +1363,12 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    # Add the always-accessible Export-for-Unreal button to the topbar.
+    _install_topbar_button()
+
 
 def unregister():
+    _uninstall_topbar_button()
     del bpy.types.Scene.arantools_active_tab
     del bpy.types.Scene.arantools_search
     for tool_id in _OPEN_TOOL_IDS:

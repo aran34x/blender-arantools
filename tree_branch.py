@@ -1,5 +1,5 @@
 """
-Tree Branch Skeleton â€” author a tree as a vertex-only mesh.
+Tree Branch Skeleton — author a tree as a vertex-only mesh.
 
 The artist draws a "stick figure" of branches with vertices + edges.
 This module walks the mesh from a user-selected root vertex, partitions
@@ -8,12 +8,12 @@ it into branches (the most-aligned neighbor at each junction is the
 attributes split across domains:
 
   EDGE  : branch_id, branch_depth, is_branch_entry
-          (categorical â€” each edge belongs to exactly one branch, so
+          (categorical — each edge belongs to exactly one branch, so
           downstream geonodes can group/separate cleanly without the
           junction-vertex ambiguity of point-domain storage)
   POINT : branch_t, radius, tilt, is_root, branch_base_z, branch_top_z,
           is_underground
-          (smoothly varying or per-vertex; survive Meshâ†’Curveâ†’Mesh)
+          (smoothly varying or per-vertex; survive Mesh→Curve→Mesh)
 
 A downstream geometry node setup then reads those attributes to sweep
 real bark geometry along the skeleton.
@@ -97,7 +97,7 @@ def _build_branches(bm, root_vert):
             "depth": depth,
             "vert_indices": verts,
             # Vertex in the parent branch where this branch enters (-1 for
-            # the root). The edge (entry_vert_idx â†’ verts[0]) is the
+            # the root). The edge (entry_vert_idx → verts[0]) is the
             # "bridge edge" that connects parent's continuation point to
             # this branch's first interior vertex.
             "entry_vert_idx": entry_vert_idx,
@@ -111,11 +111,11 @@ def _build_branches(bm, root_vert):
 # Attribute writing
 # ============================================================================
 
-# Names match Blender's built-in curve attributes where possible â€” when the
-# skeleton is later converted Meshâ†’Curve in geonodes, `radius` and `tilt`
+# Names match Blender's built-in curve attributes where possible — when the
+# skeleton is later converted Mesh→Curve in geonodes, `radius` and `tilt`
 # carry over to the curve's native sockets.
 _ATTR_SPEC = [
-    # branch_id / branch_depth live on EDGE domain â€” each edge belongs to
+    # branch_id / branch_depth live on EDGE domain — each edge belongs to
     # exactly one branch, so geonodes can group/separate by branch without
     # the junction-vertex ambiguity that comes with point-domain storage.
     ("branch_id",     'INT',     'EDGE'),
@@ -125,7 +125,7 @@ _ATTR_SPEC = [
     # geonodes delete these to split the skeleton into per-branch chains.
     ("is_branch_entry", 'BOOLEAN', 'EDGE'),
     # Smoothly varying per-vertex values that need to interpolate along
-    # the branch and survive Meshâ†’Curveâ†’Mesh round trips.
+    # the branch and survive Mesh→Curve→Mesh round trips.
     ("branch_t",      'FLOAT',   'POINT'),
     ("radius",        'FLOAT',   'POINT'),
     ("tilt",          'FLOAT',   'POINT'),
@@ -147,7 +147,7 @@ _ATTR_SPEC = [
     # tree_root_z used to be stamped for the wind-mask geonode; the
     # current UV geonode doesn't write wind to vertex color anymore, so
     # this attribute is unused. Kept commented out so re-baking doesn't
-    # leave a stale entry â€” re-add if a future geonode needs it.
+    # leave a stale entry — re-add if a future geonode needs it.
     # ("tree_root_z",  'FLOAT',   'POINT'),
 ]
 
@@ -201,12 +201,12 @@ edit mode so the artist can start extruding branches."""
 # ============================================================================
 #
 # Each category gets a Float Curve the user can edit in the N-panel. The
-# X axis runs 0 (branch base) â†’ 1 (branch tip); the Y output is the
+# X axis runs 0 (branch base) → 1 (branch tip); the Y output is the
 # radius multiplier applied on top of that category's base_radius * the
 # global depth_falloff^depth term.
 #
 # CurveMappings can't live directly on a PropertyGroup, so we stash them
-# inside a hidden ShaderNodeTree with three Float Curve nodes â€” same
+# inside a hidden ShaderNodeTree with three Float Curve nodes — same
 # pattern Blender itself uses for things like the brush falloff curve.
 
 CURVES_NODEGROUP = "AranTools_TreeBranchCurves"
@@ -242,7 +242,7 @@ def _ensure_curves_node_group():
 def get_taper_curve_node(label):
     """Read-only lookup of one taper curve's owning Float Curve node, safe
     to call from UI draw (which forbids touching bpy.data). Returns None
-    if the node group hasn't been created yet â€” the UI handles that."""
+    if the node group hasn't been created yet — the UI handles that."""
     ng = bpy.data.node_groups.get(CURVES_NODEGROUP)
     if ng is None:
         return None
@@ -280,10 +280,10 @@ class ARANTOOLS_TreeBranch_Props(bpy.types.PropertyGroup):
 
     Kept on the Scene so the values survive between runs of the operator
     (and across Blender sessions). The operator reads from here at
-    execute time â€” there are no F6 redo properties anymore."""
+    execute time — there are no F6 redo properties anymore."""
 
     # The ONLY radius knob: the radius at the base of the trunk. Every
-    # other radius in the tree is derived â€” child branches inherit their
+    # other radius in the tree is derived — child branches inherit their
     # starting radius from the parent's radius at the junction vertex,
     # then their assigned taper curve scales it along the branch length.
     # Falloff between generations is implicit in the curve shape (e.g. a
@@ -325,7 +325,7 @@ class ARANTOOLS_TreeBranch_Props(bpy.types.PropertyGroup):
 #
 # We store the trunk-base vertex index as a mesh-data custom property so it
 # travels with the object (and survives file save/load). This is the single
-# source of truth â€” Setup reads it, "Select Root" highlights it, the UI
+# source of truth — Setup reads it, "Select Root" highlights it, the UI
 # displays it. The current selection is irrelevant to Setup.
 
 ROOT_VERT_KEY = "arantools_root_vert"
@@ -469,7 +469,7 @@ class ARANTOOLS_OT_TreeSetupBranchSkeleton(Operator):
 branches (continuation chosen by smallest direction change at junctions;
 upward edge at the root), and stamp branch_id / branch_depth / branch_t /
 radius / tilt / is_root onto every reachable vertex. The root is the
-single vertex designated via 'Set Root From Selection' â€” Setup never
+single vertex designated via 'Set Root From Selection' — Setup never
 reads the current selection. Run again after edits to re-analyze."""
     bl_idname  = "arantools.tree_setup_branch_skeleton"
     bl_label   = "Setup Branch Skeleton"
@@ -489,7 +489,7 @@ reads the current selection. Run again after edits to re-analyze."""
         bm.verts.ensure_lookup_table()
 
         # The root is stored on the mesh as a single integer (custom prop
-        # ROOT_VERT_KEY). We NEVER infer it from the current selection â€”
+        # ROOT_VERT_KEY). We NEVER infer it from the current selection —
         # the artist designates it once via "Set Root From Selection", and
         # Setup just looks it up. If unset or out of range, refuse to run.
         stored = get_root_vert_index(obj.data)
@@ -507,7 +507,7 @@ reads the current selection. Run again after edits to re-analyze."""
 
         branches = _build_branches(bm, root)
 
-        # Build a (min,max)â†’edge-index lookup for stamping edge-domain attrs.
+        # Build a (min,max)→edge-index lookup for stamping edge-domain attrs.
         bm.edges.ensure_lookup_table()
         edge_lookup = {}
         for e in bm.edges:
@@ -528,7 +528,7 @@ reads the current selection. Run again after edits to re-analyze."""
         branch_base_y  = [0.0]   * n_v
         branch_base_z  = [0.0]   * n_v
         branch_top_z   = [0.0]   * n_v
-        # Use the root vertex's Z as the ground threshold â€” anything strictly
+        # Use the root vertex's Z as the ground threshold — anything strictly
         # below that is a root/underground vertex and gets wind-masked.
         root_z = root.co.z
         is_underground = [bm.verts[i].co.z < root_z for i in range(n_v)]
@@ -579,17 +579,22 @@ reads the current selection. Run again after edits to re-analyze."""
                 start_r = props.base_radius
             else:
                 # Inherit from the parent's radius at the junction vertex
-                # â€” already computed since we iterate parent-first.
+                # — already computed since we iterate parent-first.
                 start_r = radius[b["entry_vert_idx"]]
 
-            # Per-branch pivot: the X/Y/Z of the branch's lowest-Z
-            # vertex (its base). Stamped on every vert of the branch so
-            # the UV geonode can write UVMap1 / UVMap2 from it.
-            cos = [(bm.verts[vi].co.x,
-                    bm.verts[vi].co.y,
-                    bm.verts[vi].co.z) for vi in verts_in_branch]
-            base_x, base_y, b_min_z = min(cos, key=lambda c: c[2])
-            b_max_z = max(c[2] for c in cos)
+            # Per-branch pivot: the X/Y/Z of the branch's FIRST vertex
+            # (vert_indices[0]). On the skeleton this is the root vertex
+            # for the trunk and the first non-junction vertex for child
+            # branches. After Mesh→Curve→Mesh this point becomes the
+            # CENTER of each tube's bottom cross-section ring — which is
+            # what the SpeedTree-style shader expects as the per-branch
+            # pivot (verified by inspecting the reference asset's UVs).
+            first_v = bm.verts[verts_in_branch[0]]
+            base_x = first_v.co.x
+            base_y = first_v.co.y
+            base_z = first_v.co.z
+            b_min_z = base_z   # legacy alias — pivot Z is branch start Z
+            b_max_z = max(bm.verts[vi].co.z for vi in verts_in_branch)
 
             for i, vi in enumerate(verts_in_branch):
                 t = i / max(1, count - 1)
@@ -619,7 +624,7 @@ reads the current selection. Run again after edits to re-analyze."""
                     edge_branch_id[ei]    = b["id"]
                     edge_branch_depth[ei] = b["depth"]
 
-            # Bridge edge: parent's junction vert â†’ this branch's first vert.
+            # Bridge edge: parent's junction vert → this branch's first vert.
             # Belongs to the child branch and is flagged so geonodes can cut.
             if b["entry_vert_idx"] >= 0:
                 ei = _edge_idx(b["entry_vert_idx"], verts_in_branch[0])

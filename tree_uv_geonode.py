@@ -1,5 +1,5 @@
 """
-Tree Branch UV Geonode â€” bakes the SpeedTree-style identification UVs
+Tree Branch UV Geonode — bakes the SpeedTree-style identification UVs
 and depth-tier alpha onto the WOOD tube mesh.
 
 What we learned from inspecting the reference asset + the Unreal master
@@ -12,21 +12,18 @@ material functions (MF_VertexColorID + MF_FoliageHeight):
     MF_FoliageHeight)` plus the per-instance Z-scale; we just need to
     make sure UVMap2.V carries the tree's max Z.
   - The reference's Color.A has 4 discrete levels but the wind tier
-    isn't read from there â€” it's likely AO / stiffness / unused.
+    isn't read from there — it's likely AO / stiffness / unused.
     Leaving A = 1 to match the reference's typical case.
 
 So this geonode writes (all FACE_CORNER domain):
   - UVMap2    (Float2): (branch_base_z, tree_max_z)
-  - UVMap3    (Float2): (0, 1)  â€” placeholder constant
-  - UVMap1 (Float2): (branch_base_x, branch_base_y + 1)
-        Repurposed: NOT an actual lightmap. The wood shader
-        reconstructs the world-space pivot via
-        `(UVMap1.R, 1 - UVMap1.G, UVMap2.R) * -1 ?` â€”
-        we pre-bake the "+ 1" so the shader's "1 - V" undo recovers
-        the original Y in mesh-local meters.
-  - Attribute (Color): (R, 0, 0, 1)
-        R = 0.0 for trunk (depth 0), 0.1 for branches (depth â‰¥ 1).
-        The wood shader uses these to pick the wind branch tier.
+  - UVMap3    (Float2): (0, 1)  — placeholder constant
+  - UVMap1    (Float2): (branch_base_x, branch_base_y)   — raw pivot X/Y
+  - Attribute (Color):
+        Trunk          (depth 0)  : (0.0001, 0, 0, 1)
+        Any branch     (depth ≥1) : (0.001,  0, 0, branch_t)
+            Alpha ramps 0→1 along each branch's length, so every
+            depth transition gets the dark "blend point" at its base.
 
 The leaves use a different encoding (per-leaf wind amp in Color.B);
 that's handled by a separate leaf-side geonode, not here.
@@ -54,7 +51,7 @@ def _ensure_geonode_group(rebuild=False):
         # Rebuilding: clear modifiers that point at the old group first?
         # Safer to keep modifier references intact and just clear nodes/links.
         existing.nodes.clear()
-        # Wipe the interface too â€” recreated below
+        # Wipe the interface too — recreated below
         for item in list(existing.interface.items_tree):
             try:
                 existing.interface.remove(item)
@@ -64,18 +61,18 @@ def _ensure_geonode_group(rebuild=False):
     else:
         nt = bpy.data.node_groups.new(GEONODE_NAME, 'GeometryNodeTree')
 
-    # â”€â”€ Interface (inputs / outputs of the group) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Interface (inputs / outputs of the group) ─────────────────────
     nt.interface.new_socket(
         "Geometry", in_out='INPUT', socket_type='NodeSocketGeometry'
     )
-    # Wind amplitude / height-falloff inputs intentionally removed â€” the
+    # Wind amplitude / height-falloff inputs intentionally removed — the
     # wood shader doesn't read per-vertex wind from color (the reference
     # asset's wood color is all zero on RGB; alpha holds a depth tier).
     nt.interface.new_socket(
         "Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry'
     )
 
-    # â”€â”€ Local helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Local helpers ────────────────────────────────────────────────
     def mk(typ, x, y, **kw):
         node = nt.nodes.new(typ)
         node.location = (x, y)
@@ -86,11 +83,11 @@ def _ensure_geonode_group(rebuild=False):
     def link(out_node, out_id, in_node, in_id):
         nt.links.new(out_node.outputs[out_id], in_node.inputs[in_id])
 
-    # â”€â”€ Group I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Group I/O ────────────────────────────────────────────────────
     gi = mk('NodeGroupInput',  -1800, 0)
     go = mk('NodeGroupOutput',  1800, 0)
 
-    # â”€â”€ Tree max Z: needed for UVMap2.V (the per-tree max-Z pivot) â”€â”€
+    # ── Tree max Z: needed for UVMap2.V (the per-tree max-Z pivot) ──
     pos = mk('GeometryNodeInputPosition', -1600, -300)
     sep = mk('ShaderNodeSeparateXYZ',     -1400, -300)
     link(pos, 'Position', sep, 'Vector')
@@ -100,49 +97,86 @@ def _ensure_geonode_group(rebuild=False):
     link(gi,  'Geometry', stat, 'Geometry')
     link(sep, 'Z',        stat, 'Attribute')
 
-    # â”€â”€ Per-branch pivot: read branch_base_z directly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Per-branch pivot: read branch_base_z directly ────────────────
     base_attr = mk('GeometryNodeInputNamedAttribute', -1000, 300,
                    data_type='FLOAT')
     base_attr.inputs['Name'].default_value = 'branch_base_z'
 
-    # â”€â”€ Compose UVMap2 = (branch_base_z, tree_max_z, 0) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Compose UVMap2 = (branch_base_z, tree_max_z, 0) ─────────────
     uv2_combine = mk('ShaderNodeCombineXYZ', -600, 300)
     link(base_attr, 'Attribute', uv2_combine, 'X')
     link(stat,      'Max',       uv2_combine, 'Y')
 
-    # â”€â”€ Compose UVMap3 = (0, 1, 0) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Compose UVMap3 = (0, 1, 0) ──────────────────────────────────
     uv3_combine = mk('ShaderNodeCombineXYZ', -600, 100)
     uv3_combine.inputs['X'].default_value = 0.0
     uv3_combine.inputs['Y'].default_value = 1.0
     uv3_combine.inputs['Z'].default_value = 0.0
 
-    # â”€â”€ Color.R = trunk(0.0) vs branch(0.1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # Per user spec: trunk (depth 0) gets R = 0.0, any branch (depth â‰¥ 1)
-    # gets R = 0.1. Implementation: clamp branch_depth to [0, 1] (so
-    # depth 0â†’0, depth â‰¥1 â†’ 1), then multiply by 0.1.
-    depth_attr = mk('GeometryNodeInputNamedAttribute', -1000, -100,
+    # ── Color = depth-conditional (R, G, B, A) ───────────────────────
+    # Spec (revised after detailed inspection of the reference):
+    #   Trunk  (depth 0)   : (0.0001, 0, 0, 1)
+    #   Branch (depth ≥ 1) : (0.001,  0, 0, branch_t)
+    #       Alpha ramps 0→1 along each branch's length, so the "blend
+    #       points" at every depth transition (where a child branch
+    #       sprouts) get the low-alpha falloff.
+    #
+    # CombineColor (RGB mode) has no Alpha input, so we author the color
+    # via ShaderNodeMix in RGBA mode (A and B sockets accept full RGBA
+    # default values). Two Mix nodes:
+    #   1. mix_branch = lerp(branch_base=(0.001,0,0,0),
+    #                        branch_tip =(0.001,0,0,1), factor=branch_t)
+    #   2. mix_final  = pick(mix_branch, trunk=(0.0001,0,0,1),
+    #                        factor=is_trunk)
+    depth_attr = mk('GeometryNodeInputNamedAttribute', -1400, -200,
                     data_type='INT')
     depth_attr.inputs['Name'].default_value = 'branch_depth'
 
-    depth_clamp = mk('ShaderNodeClamp', -700, -100, clamp_type='MINMAX')
-    depth_clamp.inputs['Min'].default_value = 0.0
-    depth_clamp.inputs['Max'].default_value = 1.0
-    link(depth_attr, 'Attribute', depth_clamp, 'Value')
+    bt_attr = mk('GeometryNodeInputNamedAttribute', -1400, -400,
+                 data_type='FLOAT')
+    bt_attr.inputs['Name'].default_value = 'branch_t'
 
-    depth_tier = mk('ShaderNodeMath', -500, -100, operation='MULTIPLY')
-    link(depth_clamp, 'Result', depth_tier, 0)
-    depth_tier.inputs[1].default_value = 0.1
+    is_trunk = mk('FunctionNodeCompare', -1100, -100,
+                  data_type='INT', operation='EQUAL')
+    link(depth_attr, 'Attribute', is_trunk, 'A')
+    is_trunk.inputs['B'].default_value = 0
 
-    # â”€â”€ Compose Color = (depth_tier, 0, 0, 1) â€” wind tier in R â”€â”€â”€â”€â”€â”€â”€
-    # MF_VertexColorID.R * 255 = wind branch tier ID (Unreal shader).
-    # Trunk=0.0 â†’ ID 0, depth1=0.333 â†’ ID 85, depth2=0.666 â†’ 170,
-    # depthâ‰¥3=1.0 â†’ 255.
-    color_rgb = mk('FunctionNodeCombineColor', -200, -100, mode='RGB')
-    color_rgb.inputs['Green'].default_value = 0.0
-    color_rgb.inputs['Blue'].default_value  = 0.0
-    link(depth_tier, 'Value', color_rgb, 'Red')
+    def _mix_color_inputs(node):
+        return [s for s in node.inputs
+                if s.bl_idname == 'NodeSocketColor']
 
-    # â”€â”€ Per-branch pivot X / Y â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    def _mix_factor_input(node):
+        for s in node.inputs:
+            if s.name == 'Factor' and s.bl_idname.startswith('NodeSocketFloat'):
+                return s
+        for s in node.inputs:
+            if s.bl_idname.startswith('NodeSocketFloat'):
+                return s
+        raise RuntimeError(
+            f"Could not find Factor socket on Mix node {node.name}")
+
+    def _mix_color_output(node):
+        return next(s for s in node.outputs
+                    if s.bl_idname == 'NodeSocketColor')
+
+    # 1. Branch color with alpha ramping along branch_t.
+    mix_branch = mk('ShaderNodeMix', -800, -400, data_type='RGBA')
+    ca, cb = _mix_color_inputs(mix_branch)
+    ca.default_value = (0.001, 0.0, 0.0, 0.0)
+    cb.default_value = (0.001, 0.0, 0.0, 1.0)
+    nt.links.new(bt_attr.outputs['Attribute'], _mix_factor_input(mix_branch))
+
+    # 2. Pick between branch color and trunk constant by depth==0.
+    mix_final = mk('ShaderNodeMix', -400, -200, data_type='RGBA')
+    ca, cb = _mix_color_inputs(mix_final)
+    nt.links.new(_mix_color_output(mix_branch), ca)   # any branch
+    cb.default_value = (0.0001, 0.0, 0.0, 1.0)        # trunk
+    nt.links.new(is_trunk.outputs['Result'],
+                 _mix_factor_input(mix_final))
+
+    final_color_socket = _mix_color_output(mix_final)
+
+    # ── Per-branch pivot X / Y ──────────────────────────────────────
     bx_attr = mk('GeometryNodeInputNamedAttribute', -1000, 600,
                  data_type='FLOAT')
     bx_attr.inputs['Name'].default_value = 'branch_base_x'
@@ -151,68 +185,61 @@ def _ensure_geonode_group(rebuild=False):
                  data_type='FLOAT')
     by_attr.inputs['Name'].default_value = 'branch_base_y'
 
-    # The shader undoes "Fix Axis" via (1 - V) * -1 = V - 1, so we pre-
-    # bake V = branch_base_y + 1. That way the shader recovers the
-    # original Y.
-    by_plus_one = mk('ShaderNodeMath', -800, 450, operation='ADD')
-    link(by_attr, 'Attribute', by_plus_one, 0)
-    by_plus_one.inputs[1].default_value = 1.0
-
-    # â”€â”€ Compose UVMap1 = (branch_base_x, branch_base_y + 1) â”€â”€â”€â”€â”€â”€
+    # Compose UVMap1 = (branch_base_x, branch_base_y) — raw Y, no offset.
     lmap_combine = mk('ShaderNodeCombineXYZ', -600, 500)
-    link(bx_attr,      'Attribute', lmap_combine, 'X')
-    link(by_plus_one,  'Value',     lmap_combine, 'Y')
+    link(bx_attr, 'Attribute', lmap_combine, 'X')
+    link(by_attr, 'Attribute', lmap_combine, 'Y')
 
-    # â”€â”€ Store UVMap2 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Store UVMap2 ────────────────────────────────────────────────
     s_uv2 = mk('GeometryNodeStoreNamedAttribute', 0, 400,
                data_type='FLOAT2', domain='CORNER')
     s_uv2.inputs['Name'].default_value = 'UVMap2'
     link(gi,          'Geometry', s_uv2, 'Geometry')
     link(uv2_combine, 'Vector',   s_uv2, 'Value')
 
-    # â”€â”€ Store UVMap3 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Store UVMap3 ────────────────────────────────────────────────
     s_uv3 = mk('GeometryNodeStoreNamedAttribute', 400, 200,
                data_type='FLOAT2', domain='CORNER')
     s_uv3.inputs['Name'].default_value = 'UVMap3'
     link(s_uv2,       'Geometry', s_uv3, 'Geometry')
     link(uv3_combine, 'Vector',   s_uv3, 'Value')
 
-    # â”€â”€ Store UVMap1 (repurposed as per-branch pivot X / Y) â”€â”€â”€â”€â”€
+    # ── Store UVMap1 (repurposed as per-branch pivot X / Y) ─────
     s_lmap = mk('GeometryNodeStoreNamedAttribute', 800, 400,
                 data_type='FLOAT2', domain='CORNER')
     s_lmap.inputs['Name'].default_value = 'UVMap1'
     link(s_uv3,        'Geometry', s_lmap, 'Geometry')
     link(lmap_combine, 'Vector',   s_lmap, 'Value')
 
-    # â”€â”€ Store color "Attribute" = (depth_tier, 0, 0, 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Store color "Attribute" = depth-conditional RGBA ─────────────
     s_col = mk('GeometryNodeStoreNamedAttribute', 1200, -100,
                data_type='FLOAT_COLOR', domain='CORNER')
     s_col.inputs['Name'].default_value = 'Attribute'
-    link(s_lmap,    'Geometry', s_col, 'Geometry')
-    link(color_rgb, 'Color',    s_col, 'Value')
+    link(s_lmap, 'Geometry', s_col, 'Geometry')
+    nt.links.new(final_color_socket, s_col.inputs['Value'])
 
-    # â”€â”€ Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Output ───────────────────────────────────────────────────────
     link(s_col, 'Geometry', go, 'Geometry')
 
     return nt
 
 
 # ============================================================================
-# Tree Leaves UV Geonode â€” separate encoding for leaf meshes
+# Tree Leaves UV Geonode — separate encoding for leaf meshes
 # ============================================================================
 #
 # Each leaf vertex looks up the CLOSEST trunk tip (a tube vertex with
-# branch_t â‰ˆ 1.0) and inherits that tip's pivot data. So a leaf swaying
-# in the wind uses its parent branch's tip as the sway origin â€” which is
+# branch_t ≈ 1.0) and inherits that tip's pivot data. So a leaf swaying
+# in the wind uses its parent branch's tip as the sway origin — which is
 # what the shader's pivot reconstruction expects.
 #
 # Writes (all FACE_CORNER on the leaves mesh):
 #   - UVMap2    : (tip.branch_base_z, tree_max_z)
 #   - UVMap3    : (0, 1)
-#   - UVMap1 : (tip.branch_base_x, tip.branch_base_y + 1)
-#   - Attribute  : (0.001, 0.001, wind_amp, random_per_face)
-#         where wind_amp is a height-based falloff from the leaf's own
-#         vertex Z, and A is a 0-1 noise value indexed by face.
+#   - UVMap1    : (tip.branch_base_x, tip.branch_base_y)   — raw pivot X/Y
+#   - Attribute : (0.001, 0.001, random_per_face, 1)
+#         B is a 0-1 random value indexed by face (per-leaf flutter
+#         amplitude). R and G match the reference's tiny constant.
 
 GEONODE_LEAVES_NAME = "AranTools_TreeLeavesUV"
 
@@ -233,7 +260,7 @@ def _ensure_leaves_geonode_group(rebuild=False):
     else:
         nt = bpy.data.node_groups.new(GEONODE_LEAVES_NAME, 'GeometryNodeTree')
 
-    # â”€â”€ Interface â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Interface ───────────────────────────────────────────────────
     nt.interface.new_socket(
         "Geometry", in_out='INPUT', socket_type='NodeSocketGeometry'
     )
@@ -243,18 +270,11 @@ def _ensure_leaves_geonode_group(rebuild=False):
     trunk_in.description = (
         "Reference trunk mesh (post tubes geonode). The leaf vertices "
         "sample the closest tip on this object for their pivot data")
-    falloff = nt.interface.new_socket(
-        "Wind Falloff Power", in_out='INPUT', socket_type='NodeSocketFloat'
-    )
-    falloff.default_value = 1.5
-    falloff.min_value = 0.1
-    falloff.max_value = 5.0
-    falloff.description = "Exponent on (leaf_z / tree_max_z) for Color.B"
     rng = nt.interface.new_socket(
-        "Random Alpha Seed", in_out='INPUT', socket_type='NodeSocketInt'
+        "Random Blue Seed", in_out='INPUT', socket_type='NodeSocketInt'
     )
     rng.default_value = 0
-    rng.description = "Seed for the per-face random alpha"
+    rng.description = "Seed for the per-face random value written into Color.B"
     nt.interface.new_socket(
         "Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry'
     )
@@ -272,7 +292,7 @@ def _ensure_leaves_geonode_group(rebuild=False):
     gi = mk('NodeGroupInput',  -2600, 0)
     go = mk('NodeGroupOutput',  2400, 0)
 
-    # â”€â”€ Pull trunk geometry, filter to tip verts (branch_t â‰¥ 0.99) â”€â”€
+    # ── Pull trunk geometry, filter to tip verts (branch_t ≥ 0.99) ──
     obj_info = mk('GeometryNodeObjectInfo', -2400, 400)
     obj_info.transform_space = 'RELATIVE'
     link(gi, 'Trunk', obj_info, 'Object')
@@ -290,14 +310,14 @@ def _ensure_leaves_geonode_group(rebuild=False):
     link(obj_info, 'Geometry', tips, 'Geometry')
     link(is_tip,   'Result',   tips, 'Selection')
 
-    # â”€â”€ For each leaf vertex: nearest tip index on the filtered mesh â”€
+    # ── For each leaf vertex: nearest tip index on the filtered mesh ─
     leaf_pos = mk('GeometryNodeInputPosition', -2000, 0)
 
     nearest = mk('GeometryNodeSampleNearest', -1800, 0, domain='POINT')
     link(tips,     'Selection', nearest, 'Geometry')
     link(leaf_pos, 'Position',  nearest, 'Sample Position')
 
-    # â”€â”€ Sample tip attributes by that index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Sample tip attributes by that index ──────────────────────────
     def sample_tip_float(attr_name, y):
         attr = mk('GeometryNodeInputNamedAttribute', -1700, y + 100,
                   data_type='FLOAT')
@@ -313,7 +333,7 @@ def _ensure_leaves_geonode_group(rebuild=False):
     tip_by = sample_tip_float('branch_base_y', 400)
     tip_bz = sample_tip_float('branch_base_z', 200)
 
-    # â”€â”€ Tree max Z, measured on the trunk reference (not the leaves) â”€
+    # ── Tree max Z, measured on the trunk reference (not the leaves) ─
     sep_trunk = mk('ShaderNodeSeparateXYZ', -2200, 500)
     trunk_pos = mk('GeometryNodeInputPosition', -2400, 500)
     link(trunk_pos, 'Position', sep_trunk, 'Vector')
@@ -322,7 +342,7 @@ def _ensure_leaves_geonode_group(rebuild=False):
     link(obj_info,  'Geometry', stat, 'Geometry')
     link(sep_trunk, 'Z',        stat, 'Attribute')
 
-    # â”€â”€ Compose UVs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Compose UVs ──────────────────────────────────────────────────
     # UVMap2 = (tip_branch_base_z, tree_max_z)
     uv2 = mk('ShaderNodeCombineXYZ', -1100, 200)
     link(tip_bz, 'Value', uv2, 'X')
@@ -333,56 +353,67 @@ def _ensure_leaves_geonode_group(rebuild=False):
     uv3.inputs['X'].default_value = 0.0
     uv3.inputs['Y'].default_value = 1.0
 
-    # UVMap1 = (tip_bx, tip_by + 1)
-    by_plus = mk('ShaderNodeMath', -1300, 500, operation='ADD')
-    link(tip_by, 'Value', by_plus, 0)
-    by_plus.inputs[1].default_value = 1.0
+    # UVMap1 = (tip_bx, tip_by)   — raw pivot, no offset
     lmap = mk('ShaderNodeCombineXYZ', -1100, 400)
-    link(tip_bx,  'Value', lmap, 'X')
-    link(by_plus, 'Value', lmap, 'Y')
+    link(tip_bx, 'Value', lmap, 'X')
+    link(tip_by, 'Value', lmap, 'Y')
 
-    # â”€â”€ Color = (0.001, 0.001, wind_amp, random_per_face) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # wind_amp from the leaf vertex Z normalized to [0, tree_max_z],
-    # then raised to falloff power. (Range using Min as well to be
-    # consistent with the wood-side approach.)
-    sep_leaf = mk('ShaderNodeSeparateXYZ', -2000, -300)
-    link(leaf_pos, 'Position', sep_leaf, 'Vector')
+    # ── Color = (0.001, 0.001, curve(random_per_face), 1) ────────────
+    # B is a per-face random value in [0, 1], remapped through a
+    # user-editable Float Curve so the artist can shape the distribution
+    # (e.g. bias most leaves toward low wind with a few outliers).
+    # R = G = 0.001 (matching the reference). A = 1.
+    #
+    # Use GeometryNodeFaceOfCorner.Face Index as the random ID so every
+    # corner belonging to the same face gets the same random value —
+    # giving a single B per leaf face, not per corner.
+    foc = mk('GeometryNodeFaceOfCorner', -1500, -350)
 
-    z_above = mk('ShaderNodeMath', -1700, -300, operation='SUBTRACT')
-    link(sep_leaf, 'Z',   z_above, 0)
-    link(stat,     'Min', z_above, 1)
-
-    z_range = mk('ShaderNodeMath', -1700, -500, operation='SUBTRACT')
-    link(stat, 'Max', z_range, 0)
-    link(stat, 'Min', z_range, 1)
-    safe_range = mk('ShaderNodeMath', -1500, -500, operation='MAXIMUM')
-    link(z_range, 'Value', safe_range, 0)
-    safe_range.inputs[1].default_value = 1e-4
-
-    h_ratio = mk('ShaderNodeMath', -1300, -300, operation='DIVIDE')
-    h_ratio.use_clamp = True
-    link(z_above,    'Value', h_ratio, 0)
-    link(safe_range, 'Value', h_ratio, 1)
-
-    pow_h = mk('ShaderNodeMath', -1100, -300, operation='POWER')
-    link(h_ratio, 'Value',                pow_h, 0)
-    link(gi,      'Wind Falloff Power',   pow_h, 1)
-
-    # Random alpha per face: hash on Index (FACE domain).
-    rng_node = mk('FunctionNodeRandomValue', -900, -550)
+    rng_node = mk('FunctionNodeRandomValue', -1200, -350)
     rng_node.data_type = 'FLOAT'
     rng_node.inputs['Min'].default_value = 0.0
     rng_node.inputs['Max'].default_value = 1.0
-    face_idx = mk('GeometryNodeInputID', -1100, -550)
-    link(face_idx, 'ID',                 rng_node, 'ID')
-    link(gi,       'Random Alpha Seed',  rng_node, 'Seed')
+    link(foc, 'Face Index',       rng_node, 'ID')
+    link(gi,  'Random Blue Seed', rng_node, 'Seed')
 
-    color = mk('FunctionNodeCombineColor', -700, -300, mode='RGB')
-    color.inputs['Red'].default_value   = 0.001
-    color.inputs['Green'].default_value = 0.001
-    link(pow_h, 'Value', color, 'Blue')
+    # Bias the uniform random toward low values via a fixed power: most
+    # leaves get small B (gentle flutter), a few approach 1 (strong
+    # gust). Equivalent to a concave-up curve, no user knobs needed.
+    rand_curve = mk('ShaderNodeMath', -900, -350, operation='POWER')
+    link(rng_node, 'Value', rand_curve, 0)
+    rand_curve.inputs[1].default_value = 2.0
 
-    # â”€â”€ Store all the attrs in sequence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Build the color via ShaderNodeMix RGBA: lerp between
+    # (0.001, 0.001, 0, 1) and (0.001, 0.001, 1, 1) using the curved
+    # random as factor. This keeps Alpha = 1 cleanly (CombineColor has
+    # no Alpha input so we can't author A explicitly otherwise).
+    def _mix_color_inputs(node):
+        return [s for s in node.inputs
+                if s.bl_idname == 'NodeSocketColor']
+
+    def _mix_factor_input(node):
+        for s in node.inputs:
+            if s.name == 'Factor' and s.bl_idname.startswith('NodeSocketFloat'):
+                return s
+        for s in node.inputs:
+            if s.bl_idname.startswith('NodeSocketFloat'):
+                return s
+        raise RuntimeError(
+            f"Could not find Factor socket on Mix node {node.name}")
+
+    def _mix_color_output(node):
+        return next(s for s in node.outputs
+                    if s.bl_idname == 'NodeSocketColor')
+
+    mix_b = mk('ShaderNodeMix', -600, -300, data_type='RGBA')
+    ca, cb = _mix_color_inputs(mix_b)
+    ca.default_value = (0.001, 0.001, 0.0, 1.0)
+    cb.default_value = (0.001, 0.001, 1.0, 1.0)
+    nt.links.new(rand_curve.outputs['Value'], _mix_factor_input(mix_b))
+
+    final_color_socket = _mix_color_output(mix_b)
+
+    # ── Store all the attrs in sequence ──────────────────────────────
     s_uv2 = mk('GeometryNodeStoreNamedAttribute', 0, 200,
                data_type='FLOAT2', domain='CORNER')
     s_uv2.inputs['Name'].default_value = 'UVMap2'
@@ -405,19 +436,9 @@ def _ensure_leaves_geonode_group(rebuild=False):
                data_type='FLOAT_COLOR', domain='CORNER')
     s_col.inputs['Name'].default_value = 'Attribute'
     link(s_lmap, 'Geometry', s_col, 'Geometry')
-    link(color,  'Color',    s_col, 'Value')
+    nt.links.new(final_color_socket, s_col.inputs['Value'])
 
-    # Random alpha gets stored as a separate FLOAT_COLOR write on the
-    # alpha channel â€” but since CombineColor has no Alpha input, we use
-    # a follow-up Store on the FLOAT 'leaf_alpha' so the artist (or a
-    # shader-side patch) can read it as the per-face alpha.
-    s_alpha = mk('GeometryNodeStoreNamedAttribute', 1500, -500,
-                 data_type='FLOAT', domain='FACE')
-    s_alpha.inputs['Name'].default_value = 'leaf_alpha'
-    link(s_col,    'Geometry', s_alpha, 'Geometry')
-    link(rng_node, 'Value',    s_alpha, 'Value')
-
-    link(s_alpha, 'Geometry', go, 'Geometry')
+    link(s_col, 'Geometry', go, 'Geometry')
     return nt
 
 
@@ -429,7 +450,7 @@ class ARANTOOLS_OT_TreeAddUVGeonode(Operator):
     """Build the Tree Branch UV node group if missing, then add it as a
 Geometry Nodes modifier on the active mesh. The modifier writes UVMap2,
 UVMap3 and a 'Attribute' color attribute every time the depsgraph
-re-evaluates â€” leave it on the stack while iterating."""
+re-evaluates — leave it on the stack while iterating."""
     bl_idname  = "arantools.tree_add_uv_geonode"
     bl_label   = "Add Branch UV Geonode"
     bl_options = {'REGISTER', 'UNDO'}
@@ -458,7 +479,7 @@ re-evaluates â€” leave it on the stack while iterating."""
 class ARANTOOLS_OT_TreeRebuildUVGeonode(Operator):
     """Rebuild the Tree Branch UV node group's contents from the addon's
 current definition. Any manual edits to the group are lost. Existing
-modifier references keep working â€” the group's identity is preserved,
+modifier references keep working — the group's identity is preserved,
 only its insides are replaced."""
     bl_idname  = "arantools.tree_rebuild_uv_geonode"
     bl_label   = "Rebuild UV Node Group"
