@@ -23,6 +23,7 @@ from . import tree_inspect
 from . import tree_branch
 from . import tree_uv_geonode
 from . import tree_tubes_geonode
+from . import tree_blend_geonode
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -86,6 +87,7 @@ _TOOL_REGISTRY = [
     ('tree_branch',    'Branch Skeleton',        'Author a tree as a vertex-only mesh. Select the trunk-base vertex, hit Setup, and the tool partitions the skeleton into branches and writes radius/tilt/branch_id attributes for the geonode to read', 'TREE', 'CURVE_PATH', '_draw_t_tree_branch',    False),
     ('tree_tubes',     'Branch Tubes Geonode',   'Add a Geometry Nodes modifier that sweeps a circular profile along each branch of a skeleton, producing closed-tip / open-base tubes with auto UV0', 'TREE', 'MESH_CYLINDER', '_draw_t_tree_tubes', False),
     ('tree_uv',        'Branch UV Geonode',      'Add a Geometry Nodes modifier that bakes wind/identification UVs (UVMap2, UVMap3) and the vertex-color Attribute onto a branch mesh, matching the SpeedTree-style encoding', 'TREE', 'NODETREE', '_draw_t_tree_uv',     False),
+    ('tree_blend',     'Branch Blend Geonode',   'Weld the disconnected per-branch tubes into one connected mesh — pulls each child branch base ring inward to its junction point and merges by distance, preserving UVs and color attributes', 'TREE', 'MOD_REMESH',         '_draw_t_tree_blend',     False),
     ('tree_inspect',   'Tree Inspector',         'Dump UV layers, vertex colors, materials, modifiers, and collection hierarchy as a JSON report for reverse-engineering foliage/tree setups', 'TREE', 'VIEWZOOM',          '_draw_t_tree_inspect',   False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
     ('export_sets',    'ARP Export Sets',        'Group meshes into named sets and batch-export each as its own FBX via Auto-Rig Pro. Overwrites existing files', 'EXPORT', 'GROUP',          '_draw_t_export_sets',    False),
@@ -798,6 +800,53 @@ class ARANTOOLS_PT_main(Panel):
         info.label(text="• Skeleton attrs carry through for the UV geonode",
                    icon='INFO')
 
+    def _draw_t_tree_blend(self, layout, context):
+        from . import tree_blend_geonode as _blend
+        col = layout.column(align=True)
+
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            col.label(text="Select a mesh object.", icon='INFO')
+            return
+
+        ng = bpy.data.node_groups.get(_blend.GEONODE_BLEND_NAME)
+        if ng is None:
+            col.label(text="Node group not yet created.", icon='INFO')
+        else:
+            col.label(text=f"Node group: {ng.name}", icon='NODETREE')
+
+        has_mod = any(m.type == 'NODES' and m.node_group == ng
+                      for m in obj.modifiers) if ng else False
+        if has_mod:
+            col.label(text="Modifier is on this mesh.", icon='CHECKMARK')
+
+        col.separator()
+        op_row = col.row()
+        op_row.scale_y = 1.4
+        op_row.enabled = not has_mod
+        op_row.operator("arantools.tree_add_blend_geonode",
+                        text="Add to Active Mesh", icon='ADD')
+        col.operator("arantools.tree_rebuild_blend_geonode",
+                     text="Rebuild Group from Source", icon='FILE_REFRESH')
+
+        info = layout.box()
+        info.label(text="Place in modifier stack:", icon='MOD_REMESH')
+        info.label(text="  Tubes → Blend → Branch UV")
+        info.label(text="  (UVs are written AFTER blending)", icon='INFO')
+        info.separator()
+        info.label(text="What it does:", icon='QUESTION')
+        info.label(text="• Instances a flared frustum (the 'collar') at")
+        info.label(text="  each child branch's junction with its parent.")
+        info.label(text="• Collar top welds to the child base ring.")
+        info.label(text="• Collar bottom flares outward to hide the gap.")
+        info.label(text="• Subdivision Surface smooths the seam.")
+        info.label(text="• UVs / color / branch_* propagate to the collar.")
+        info.label(text="• Trunk is left alone (no parent to bridge to).")
+        info.separator()
+        info.label(text="Needs parent_junction_x/y/z on the skeleton —",
+                   icon='INFO')
+        info.label(text="re-run Setup Branch Skeleton if missing.")
+
     def _draw_t_tree_uv(self, layout, context):
         from . import tree_uv_geonode as _uv
         col = layout.column(align=True)
@@ -832,10 +881,24 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
         info = layout.box()
+        # Post-conversion helper: fix UV layer order after Apply Modifiers
+        layout.separator()
+        fix_box = layout.box()
+        fix_box.label(text="After Convert-to-Mesh / Apply Modifiers:",
+                      icon='UV_DATA')
+        fix_box.label(text="UV layers may be jumbled — force the order:")
+        fix_box.label(text="  [0] UVMap  [1] UVMap1  [2] UVMap2  [3] UVMap3")
+        fr = fix_box.row()
+        fr.scale_y = 1.3
+        fr.operator("arantools.tree_fix_uv_order",
+                    text="Fix UV Layer Order on Selected",
+                    icon='FILE_REFRESH')
+
+        info = layout.box()
         info.label(text="Wood outputs (FACE_CORNER):", icon='UV_DATA')
         info.label(text="• UVMap2 = (branch_base_z, tree_max_z)")
         info.label(text="• UVMap3 = (0, 1)   (placeholder)")
-        info.label(text="• UVMap1 = (branch_base_x, branch_base_y)")
+        info.label(text="• UVMap1 = (branch_base_x, branch_base_y + 1)")
         info.label(text="• Attribute:")
         info.label(text="    trunk    = (0.0001, 0, 0, 1)")
         info.label(text="    branch   = (0.001,  0, 0, branch_t)")
@@ -867,7 +930,7 @@ class ARANTOOLS_PT_main(Panel):
                     icon='UV_DATA')
         linfo.label(text="• UVMap2 = (tip.branch_base_z, tree_max_z)")
         linfo.label(text="• UVMap3 = (0, 1)")
-        linfo.label(text="• UVMap1 = (tip.bx, tip.by)")
+        linfo.label(text="• UVMap1 = (tip.bx, tip.by + 1)")
         linfo.label(text="• Attribute = (0.001, 0.001, random_B, 1)")
         linfo.label(text="    B is a per-face random in [0, 1]")
         linfo.label(text="Set 'Trunk' object input on the modifier!",
@@ -926,6 +989,20 @@ class ARANTOOLS_PT_main(Panel):
                       icon='UV_DATA')
         vbox.label(text="Results: info bar summary + clipboard + console.",
                    icon='CONSOLE')
+
+        # ── Hand-edited geonode → source dump ─────────────────────────
+        layout.separator()
+        dbox = layout.box()
+        dbox.label(text="Capture Hand-Edited Geonodes", icon='NODETREE')
+        dbox.label(text="Serializes both UV node groups to JSON",
+                   icon='COPYDOWN')
+        dbox.label(text="(clipboard + tree_uv_geonodes_dump.json).",
+                   icon='BLANK1')
+        drow = dbox.row()
+        drow.scale_y = 1.3
+        drow.operator("arantools.tree_dump_uv_geonodes",
+                      text="Dump UV Geonodes to Clipboard",
+                      icon='NODETREE')
 
     def _draw_t_mod_sync(self, layout, context):
         props = context.scene.arantools_mod_sync
@@ -1331,6 +1408,7 @@ def register():
     tree_branch.register()
     tree_uv_geonode.register()
     tree_tubes_geonode.register()
+    tree_blend_geonode.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -1375,6 +1453,7 @@ def unregister():
         delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    tree_blend_geonode.unregister()
     tree_tubes_geonode.unregister()
     tree_uv_geonode.unregister()
     tree_branch.unregister()
