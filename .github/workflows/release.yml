@@ -39,13 +39,16 @@ jobs:
             libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libgl1 \
             libxrender1 libsm6 libxext6 xvfb
 
+      # Download/extract OUTSIDE the repo. If Blender lands in the working
+      # tree, `extension build` packages the whole ~400MB distribution (plus
+      # the tarball) into the addon zip — that's the 800MB-zip bug.
       - name: Download Blender
         run: |
           DIR="blender-${BLENDER_VERSION}-linux-x64"
-          curl -fL -o blender.tar.xz \
+          curl -fL -o "$RUNNER_TEMP/blender.tar.xz" \
             "https://download.blender.org/release/Blender${BLENDER_SERIES}/${DIR}.tar.xz"
-          tar -xf blender.tar.xz
-          echo "BLENDER=$PWD/${DIR}/blender" >> "$GITHUB_ENV"
+          tar -xf "$RUNNER_TEMP/blender.tar.xz" -C "$RUNNER_TEMP"
+          echo "BLENDER=$RUNNER_TEMP/${DIR}/blender" >> "$GITHUB_ENV"
 
       - name: Build extension and generate repo index
         run: |
