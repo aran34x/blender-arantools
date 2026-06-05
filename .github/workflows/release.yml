@@ -1,0 +1,69 @@
+name: Build & Publish Extension
+
+# Publishes the extension repository (index.json + zip) to GitHub Pages so
+# Blender clients can auto-update. Triggers when you push a version tag
+# (e.g. `git tag v0.2.1 && git push --tags`) or run it manually.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # Any Blender >= 4.2 can build the extension. Bump if the URL 404s.
+  BLENDER_VERSION: "4.2.3"
+  BLENDER_SERIES: "4.2"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Blender's CLI links X libraries even in --command mode.
+      - name: Install Blender runtime libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxxf86vm1 libxfixes3 libxi6 libxkbcommon0 libgl1 \
+            libxrender1 libsm6 libxext6 xvfb
+
+      - name: Download Blender
+        run: |
+          DIR="blender-${BLENDER_VERSION}-linux-x64"
+          curl -fL -o blender.tar.xz \
+            "https://download.blender.org/release/Blender${BLENDER_SERIES}/${DIR}.tar.xz"
+          tar -xf blender.tar.xz
+          echo "BLENDER=$PWD/${DIR}/blender" >> "$GITHUB_ENV"
+
+      - name: Build extension and generate repo index
+        run: |
+          mkdir -p repo
+          xvfb-run -a "$BLENDER" --command extension build --output-dir ./repo
+          xvfb-run -a "$BLENDER" --command extension server-generate \
+            --repo-dir ./repo --html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./repo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

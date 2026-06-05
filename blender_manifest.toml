@@ -1,0 +1,39 @@
+schema_version = "1.0.0"
+
+# Unique identifier (lowercase, no spaces). Do not change once shared —
+# the update system keys off it.
+id = "arantools"
+version = "0.2.0"
+name = "Aran Tools"
+tagline = "Rigging, weight, naming, animation and tree authoring tools"
+maintainer = "Aran <aran34x@gmail.com>"
+type = "add-on"
+
+# Minimum Blender that supports extensions.
+blender_version_min = "4.2.0"
+
+# SPDX license tag. Change if you license it differently.
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Rigging", "Animation", "Pipeline"]
+
+# Declared so users see what the add-on touches (it writes baked normal
+# maps, FBX exports and inspection reports to disk).
+[permissions]
+files = "Write baked textures, FBX exports and inspection reports"
+
+# Keep developer-only files out of the published zip.
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/.github/",
+  "/.gitignore",
+  "/.claude/",
+  "/CLAUDE.md",
+  "/DISTRIBUTING.md",
+  "*.bat",
+  "*.blend",
+  "*.blend1",
+  "/tree_uv_geonodes_dump.json",
+]

@@ -17,12 +17,15 @@ from . import naming
 from . import weight_tools
 from . import organization
 from . import export
+from . import baking
 from . import island_flatten
 from . import modifier_sync
 from . import tree_inspect
 from . import tree_branch
 from . import tree_uv_geonode
 from . import tree_tubes_geonode
+from . import tree_blend_geonode
+from . import tree_rings
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -86,9 +89,13 @@ _TOOL_REGISTRY = [
     ('tree_branch',    'Branch Skeleton',        'Author a tree as a vertex-only mesh. Select the trunk-base vertex, hit Setup, and the tool partitions the skeleton into branches and writes radius/tilt/branch_id attributes for the geonode to read', 'TREE', 'CURVE_PATH', '_draw_t_tree_branch',    False),
     ('tree_tubes',     'Branch Tubes Geonode',   'Add a Geometry Nodes modifier that sweeps a circular profile along each branch of a skeleton, producing closed-tip / open-base tubes with auto UV0', 'TREE', 'MESH_CYLINDER', '_draw_t_tree_tubes', False),
     ('tree_uv',        'Branch UV Geonode',      'Add a Geometry Nodes modifier that bakes wind/identification UVs (UVMap2, UVMap3) and the vertex-color Attribute onto a branch mesh, matching the SpeedTree-style encoding', 'TREE', 'NODETREE', '_draw_t_tree_uv',     False),
+    ('tree_blend',     'Branch Blend Geonode',   'Weld the disconnected per-branch tubes into one connected mesh — pulls each child branch base ring inward to its junction point and merges by distance, preserving UVs and color attributes', 'TREE', 'MOD_REMESH',         '_draw_t_tree_blend',     False),
+    ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'TREE', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
     ('tree_inspect',   'Tree Inspector',         'Dump UV layers, vertex colors, materials, modifiers, and collection hierarchy as a JSON report for reverse-engineering foliage/tree setups', 'TREE', 'VIEWZOOM',          '_draw_t_tree_inspect',   False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
     ('export_sets',    'ARP Export Sets',        'Group meshes into named sets and batch-export each as its own FBX via Auto-Rig Pro. Overwrites existing files', 'EXPORT', 'GROUP',          '_draw_t_export_sets',    False),
+    ('normal_bake',    'Normal Map Baker',       'Scan for <name> / <name>_High mesh pairs and bake a tangent-space normal map onto each low mesh, writing a PNG per texture to a folder. Selected-to-active or from-multires; per-object, by-material, or manual groups. Restores the scene afterward', 'BAKING', 'NORMALS_FACE', '_draw_t_normal_bake', False),
+    ('multires_setup', 'Multires from High Poly','Add a Multires modifier to each low mesh, subdivide it, and shrinkwrap the detail onto the matching high mesh — baking the high-poly shape into the multires for a clean from-multires normal bake', 'BAKING', 'MOD_MULTIRES', '_draw_t_multires_setup', False),
     ('seq_namer',      'Object Sequence Namer',  'Name selected objects as a numbered sequence (e.g. Monkey_01, Monkey_02), filling gaps and respecting existing names', 'NAMING', 'LINENUMBERS_ON', '_draw_t_seq_namer', False),
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
     ('anim_org',       'Animation Organization', 'Manage an armature\'s actions: list, create (with Fake User), and auto-set the timeline from a "_NNN" duration suffix', 'ANIMATION', 'ACTION',           '_draw_t_anim_org',       False),
@@ -138,6 +145,7 @@ class ARANTOOLS_PT_main(Panel):
             'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
             'ORGANIZATION': ('Organization', 'OUTLINER'),
             'EXPORT':       ('Export',       'EXPORT'),
+            'BAKING':       ('Baking',       'NORMALS_FACE'),
             'NAMING':       ('Naming',       'SORTALPHA'),
             'ANIMATION':    ('Animation',    'ANIM'),
             'TREE':         ('Tree Tools',   'OUTLINER_OB_CURVES'),
@@ -158,6 +166,7 @@ class ARANTOOLS_PT_main(Panel):
             ('WEIGHT',       'MOD_VERTEX_WEIGHT', 'COLORSET_02_VEC'),
             ('ORGANIZATION', 'OUTLINER',          'COLORSET_06_VEC'),
             ('EXPORT',       'EXPORT',            'COLORSET_12_VEC'),
+            ('BAKING',       'NORMALS_FACE',      'COLORSET_09_VEC'),
             ('NAMING',       'SORTALPHA',         'COLORSET_03_VEC'),
             ('ANIMATION',    'ANIM',              'COLORSET_05_VEC'),
             ('TREE',         'OUTLINER_OB_CURVES','COLORSET_04_VEC'),
@@ -210,6 +219,7 @@ class ARANTOOLS_PT_main(Panel):
             'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
             'ORGANIZATION': ('Organization', 'OUTLINER'),
             'EXPORT':       ('Export',       'EXPORT'),
+            'BAKING':       ('Baking',       'NORMALS_FACE'),
             'NAMING':       ('Naming',       'SORTALPHA'),
             'ANIMATION':    ('Animation',    'ANIM'),
             'TREE':         ('Tree Tools',   'OUTLINER_OB_CURVES'),
@@ -628,6 +638,299 @@ class ARANTOOLS_PT_main(Panel):
         layout.label(text="Filename = Prefix + Action name. Overwrites existing.",
                      icon='INFO')
 
+    def _draw_t_normal_bake(self, layout, context):
+        from . import baking as _baking
+        props = context.scene.arantools_normal_bake
+        multires = props.bake_mode == 'MULTIRES'
+        col = layout.column(align=True)
+
+        # ── Method ────────────────────────────────────────────────────────
+        col.label(text="Method:", icon='RENDER_STILL')
+        col.prop(props, "bake_mode", expand=True)
+        col.separator()
+
+        # ── Naming rules ──────────────────────────────────────────────────
+        col.label(text="Naming Rule:", icon='SORTALPHA')
+        col.prop(props, "high_suffix", text="High Suffix")
+        if not multires:
+            cage_row = col.row(align=True)
+            cage_row.prop(props, "use_cage", text="")
+            sub = cage_row.row(align=True)
+            sub.enabled = props.use_cage
+            sub.prop(props, "cage_suffix", text="Cage Suffix")
+        col.separator()
+
+        # ── Output ────────────────────────────────────────────────────────
+        col.label(text="Output:", icon='FILE_FOLDER')
+        folder_row = col.row(align=True)
+        folder_row.prop(props, "output_folder", text="Folder")
+        folder_row.operator("arantools.open_bake_folder", text="", icon='FOLDER_REDIRECT')
+        if not props.output_folder.strip():
+            resolved = _baking._resolve_output_folder(props)
+            if resolved:
+                col.label(text="→ " + resolved, icon='BLANK1')
+            else:
+                col.label(text="Save the .blend or pick a folder.", icon='ERROR')
+        col.prop(props, "image_suffix", text="Map Suffix")
+        col.prop(props, "resolution", text="Size")
+        col.separator()
+
+        # ── Bake settings ─────────────────────────────────────────────────
+        col.label(text="Bake Settings:", icon='RENDER_STILL')
+        if props.grouping != 'MANUAL':
+            col.prop(props, "scope", expand=True)
+        col.prop(props, "samples")
+        col.prop(props, "margin")
+        if not multires:
+            col.prop(props, "cage_extrusion")
+            col.prop(props, "max_ray_distance")
+        col.prop(props, "flip_green")
+        if not multires:
+            col.prop(props, "align_pivots")
+        col.prop(props, "assign_to_material")
+        col.separator()
+        col.prop(props, "grouping", text="Group")
+
+        # ── Compute device ────────────────────────────────────────────────
+        col.separator()
+        col.label(text="Cycles Device:", icon='SYSTEM')
+        col.prop(props, "cycles_device", expand=True)
+        if props.cycles_device == 'GPU':
+            backend = _baking._gpu_backend_label()
+            if backend:
+                col.label(text=f"Backend: {backend}", icon='BLANK1')
+            else:
+                col.label(text="No GPU enabled — set it in Preferences > "
+                               "System.", icon='ERROR')
+
+        # ── Target preview ────────────────────────────────────────────────
+        pool = list(context.scene.objects)
+
+        if props.grouping == 'MANUAL':
+            runnable = self._draw_bake_groups(layout, context, props,
+                                              pool, multires, _baking)
+        elif props.grouping == 'MATERIAL':
+            runnable = self._draw_material_groups(layout, context, props,
+                                                  pool, multires, _baking)
+        else:
+            if props.scope == 'SELECTED':
+                seeds = list(context.selected_objects)
+            else:
+                seeds = pool
+
+            prev = layout.box()
+            if multires:
+                targets = _baking._find_multires_targets(seeds, pool, props)
+                if not targets:
+                    prev.label(text="No meshes with a Multires modifier in scope.",
+                               icon='INFO')
+                    prev.label(text="Use 'Multires from High Poly' first.",
+                               icon='MOD_MULTIRES')
+                else:
+                    prev.label(text=f"{len(targets)} multires mesh(es):",
+                               icon='MOD_MULTIRES')
+                    for low in targets[:8]:
+                        prev.label(text=low.name, icon='DOT')
+                    if len(targets) > 8:
+                        prev.label(text=f"… (+{len(targets) - 8} more)")
+                runnable = bool(targets)
+            else:
+                pairs = _baking._find_bake_pairs(seeds, pool, props)
+                if not pairs:
+                    prev.label(text=f"No '<name>' + '{props.high_suffix}' pairs found.",
+                               icon='INFO')
+                    if props.scope == 'SELECTED':
+                        prev.label(text="Select the low OR the high mesh.",
+                                   icon='MOUSE_LMB')
+                else:
+                    prev.label(text=f"{len(pairs)} pair(s) → low ← high:",
+                               icon='NORMALS_FACE')
+                    for low, high, cage in pairs[:6]:
+                        txt = f"{low.name}  ←  {high.name}"
+                        if cage is not None:
+                            txt += f"  [cage: {cage.name}]"
+                        prev.label(text=txt, icon='DOT')
+                    if len(pairs) > 6:
+                        prev.label(text=f"… (+{len(pairs) - 6} more)")
+                runnable = bool(pairs)
+
+        # ── Run ───────────────────────────────────────────────────────────
+        run = layout.row()
+        run.scale_y = 1.4
+        run.enabled = runnable
+        run.operator("arantools.normal_bake",
+                     text="Bake Normal Maps", icon='RENDER_STILL')
+        layout.label(text="Uses Cycles. Scene state is restored after baking.",
+                     icon='INFO')
+        if props.assign_to_material:
+            layout.label(text="Switch viewport to Material Preview to see it.",
+                         icon='SHADING_RENDERED')
+
+        # ── Last baked: open the resulting texture(s) ─────────────────────
+        if props.last_baked:
+            done = layout.box()
+            done.label(text=f"Last Baked ({len(props.last_baked)}):",
+                       icon='TEXTURE')
+            for i, entry in enumerate(props.last_baked):
+                row = done.row(align=True)
+                row.label(text=entry.name, icon='IMAGE_DATA')
+                op = row.operator("arantools.open_baked_texture",
+                                  text="Open", icon='ZOOM_ALL')
+                op.index = i
+
+    def _draw_bake_groups(self, layout, context, props, pool, multires, _baking):
+        """Draw the group manager. Returns True if at least one group has
+        bakeable members."""
+        col = layout.column(align=True)
+        add_row = col.row(align=True)
+        add_row.scale_y = 1.2
+        add_row.operator("arantools.bakegroup_add_from_selection",
+                         text="+ From Selection", icon='RESTRICT_SELECT_OFF')
+        add_row.operator("arantools.bakegroup_add",
+                         text="+ Empty", icon='NEWFOLDER')
+
+        if not props.bake_groups:
+            col.label(text="No groups yet. Select meshes → '+ From Selection'.",
+                      icon='INFO')
+            return False
+
+        any_runnable = False
+        for i, group in enumerate(props.bake_groups):
+            box = layout.box()
+            header = box.row(align=True)
+            header.prop(group, "expanded", text="", emboss=False,
+                        icon='TRIA_DOWN' if group.expanded else 'TRIA_RIGHT')
+            header.prop(group, "name", text="")
+            op = header.operator("arantools.bakegroup_remove", text="", icon='X')
+            op.index = i
+
+            members = _baking._resolve_group_members(group, pool, props, multires)
+            if members:
+                any_runnable = True
+
+            if not group.expanded:
+                continue
+
+            body = box.column(align=True)
+            name = group.name.strip()
+            if name:
+                body.label(text=f"→ {name}{props.image_suffix}.png",
+                           icon='IMAGE_DATA')
+            else:
+                body.label(text="Empty texture name — group skipped.",
+                           icon='ERROR')
+
+            if members:
+                body.label(text=f"{len(members)} bakeable:", icon='CHECKMARK')
+                for low, high, _cage in members[:6]:
+                    txt = low.name if high is None else f"{low.name} ← {high.name}"
+                    body.label(text=txt, icon='DOT')
+                if len(members) > 6:
+                    body.label(text=f"… (+{len(members) - 6} more)")
+            else:
+                body.label(text="No bakeable members (check naming / multires).",
+                           icon='INFO')
+
+            btns = body.row(align=True)
+            for op_id, text, icon in (
+                ("arantools.bakegroup_set_members", "Set",    'IMPORT'),
+                ("arantools.bakegroup_add_members", "Add",    'ADD'),
+                ("arantools.bakegroup_clear",       "Clear",  'X'),
+                ("arantools.bakegroup_select",      "Select", 'RESTRICT_SELECT_OFF'),
+            ):
+                op = btns.operator(op_id, text=text, icon=icon)
+                op.index = i
+
+        return any_runnable
+
+    def _draw_material_groups(self, layout, context, props, pool, multires,
+                              _baking):
+        """Preview the by-material grouping. Returns True if anything bakes."""
+        if props.scope == 'SELECTED':
+            seeds = list(context.selected_objects)
+        else:
+            seeds = pool
+        if multires:
+            members = [(low, None, None)
+                       for low in _baking._find_multires_targets(seeds, pool, props)]
+        else:
+            members = list(_baking._find_bake_pairs(seeds, pool, props))
+
+        buckets = {}
+        no_mat = []
+        for m in members:
+            mat = m[0].active_material
+            if mat is None:
+                no_mat.append(m[0].name)
+            else:
+                buckets.setdefault(mat.name, []).append(m)
+
+        box = layout.box()
+        if not buckets:
+            box.label(text="No low meshes with a material in scope.", icon='INFO')
+            if members:
+                box.label(text="Assign a material to group by it.",
+                          icon='MATERIAL')
+        else:
+            box.label(text=f"{len(buckets)} texture(s) by material:",
+                      icon='MATERIAL')
+            for mat_name, mem in list(buckets.items())[:8]:
+                box.label(text=f"{mat_name}{props.image_suffix}  "
+                               f"({len(mem)} mesh)", icon='IMAGE_DATA')
+            if len(buckets) > 8:
+                box.label(text=f"… (+{len(buckets) - 8} more)")
+        if no_mat:
+            box.label(text=f"{len(no_mat)} mesh(es) skipped (no material).",
+                      icon='ERROR')
+        return bool(buckets)
+
+    def _draw_t_multires_setup(self, layout, context):
+        from . import baking as _baking
+        props = context.scene.arantools_normal_bake
+        col = layout.column(align=True)
+
+        col.label(text="Naming Rule:", icon='SORTALPHA')
+        col.prop(props, "high_suffix", text="High Suffix")
+        col.separator()
+
+        col.label(text="Multires:", icon='MOD_MULTIRES')
+        col.prop(props, "multires_subdivisions")
+        col.prop(props, "multires_wrap_method", text="Projection")
+        if props.multires_wrap_method == 'PROJECT':
+            col.prop(props, "multires_project_limit")
+        col.separator()
+
+        col.prop(props, "scope", expand=True)
+
+        pool = list(context.scene.objects)
+        if props.scope == 'SELECTED':
+            seeds = list(context.selected_objects)
+        else:
+            seeds = pool
+        pairs = _baking._find_bake_pairs(seeds, pool, props)
+
+        prev = layout.box()
+        if not pairs:
+            prev.label(text=f"No '<name>' + '{props.high_suffix}' pairs found.",
+                       icon='INFO')
+            if props.scope == 'SELECTED':
+                prev.label(text="Select the low OR the high mesh.",
+                           icon='MOUSE_LMB')
+        else:
+            prev.label(text=f"{len(pairs)} pair(s) → low ← high:",
+                       icon='MOD_MULTIRES')
+            for low, high, _cage in pairs[:6]:
+                prev.label(text=f"{low.name}  ←  {high.name}", icon='DOT')
+            if len(pairs) > 6:
+                prev.label(text=f"… (+{len(pairs) - 6} more)")
+
+        run = layout.row()
+        run.scale_y = 1.4
+        run.enabled = bool(pairs)
+        run.operator("arantools.multires_from_high",
+                     text="Build Multires from High Poly", icon='MOD_MULTIRES')
+        layout.label(text="Then bake with method 'From Multires'.", icon='INFO')
+
     def _draw_t_tree_branch(self, layout, context):
         from . import tree_branch as _tb
         obj = context.active_object
@@ -798,6 +1101,53 @@ class ARANTOOLS_PT_main(Panel):
         info.label(text="• Skeleton attrs carry through for the UV geonode",
                    icon='INFO')
 
+    def _draw_t_tree_blend(self, layout, context):
+        from . import tree_blend_geonode as _blend
+        col = layout.column(align=True)
+
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            col.label(text="Select a mesh object.", icon='INFO')
+            return
+
+        ng = bpy.data.node_groups.get(_blend.GEONODE_BLEND_NAME)
+        if ng is None:
+            col.label(text="Node group not yet created.", icon='INFO')
+        else:
+            col.label(text=f"Node group: {ng.name}", icon='NODETREE')
+
+        has_mod = any(m.type == 'NODES' and m.node_group == ng
+                      for m in obj.modifiers) if ng else False
+        if has_mod:
+            col.label(text="Modifier is on this mesh.", icon='CHECKMARK')
+
+        col.separator()
+        op_row = col.row()
+        op_row.scale_y = 1.4
+        op_row.enabled = not has_mod
+        op_row.operator("arantools.tree_add_blend_geonode",
+                        text="Add to Active Mesh", icon='ADD')
+        col.operator("arantools.tree_rebuild_blend_geonode",
+                     text="Rebuild Group from Source", icon='FILE_REFRESH')
+
+        info = layout.box()
+        info.label(text="Place in modifier stack:", icon='MOD_REMESH')
+        info.label(text="  Tubes → Blend → Branch UV")
+        info.label(text="  (UVs are written AFTER blending)", icon='INFO')
+        info.separator()
+        info.label(text="What it does:", icon='QUESTION')
+        info.label(text="• Instances a flared frustum (the 'collar') at")
+        info.label(text="  each child branch's junction with its parent.")
+        info.label(text="• Collar top welds to the child base ring.")
+        info.label(text="• Collar bottom flares outward to hide the gap.")
+        info.label(text="• Subdivision Surface smooths the seam.")
+        info.label(text="• UVs / color / branch_* propagate to the collar.")
+        info.label(text="• Trunk is left alone (no parent to bridge to).")
+        info.separator()
+        info.label(text="Needs parent_junction_x/y/z on the skeleton —",
+                   icon='INFO')
+        info.label(text="re-run Setup Branch Skeleton if missing.")
+
     def _draw_t_tree_uv(self, layout, context):
         from . import tree_uv_geonode as _uv
         col = layout.column(align=True)
@@ -832,10 +1182,24 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
         info = layout.box()
+        # Post-conversion helper: fix UV layer order after Apply Modifiers
+        layout.separator()
+        fix_box = layout.box()
+        fix_box.label(text="After Convert-to-Mesh / Apply Modifiers:",
+                      icon='UV_DATA')
+        fix_box.label(text="UV layers may be jumbled — force the order:")
+        fix_box.label(text="  [0] UVMap  [1] UVMap1  [2] UVMap2  [3] UVMap3")
+        fr = fix_box.row()
+        fr.scale_y = 1.3
+        fr.operator("arantools.tree_fix_uv_order",
+                    text="Fix UV Layer Order on Selected",
+                    icon='FILE_REFRESH')
+
+        info = layout.box()
         info.label(text="Wood outputs (FACE_CORNER):", icon='UV_DATA')
         info.label(text="• UVMap2 = (branch_base_z, tree_max_z)")
         info.label(text="• UVMap3 = (0, 1)   (placeholder)")
-        info.label(text="• UVMap1 = (branch_base_x, branch_base_y)")
+        info.label(text="• UVMap1 = (branch_base_x, branch_base_y + 1)")
         info.label(text="• Attribute:")
         info.label(text="    trunk    = (0.0001, 0, 0, 1)")
         info.label(text="    branch   = (0.001,  0, 0, branch_t)")
@@ -867,11 +1231,57 @@ class ARANTOOLS_PT_main(Panel):
                     icon='UV_DATA')
         linfo.label(text="• UVMap2 = (tip.branch_base_z, tree_max_z)")
         linfo.label(text="• UVMap3 = (0, 1)")
-        linfo.label(text="• UVMap1 = (tip.bx, tip.by)")
+        linfo.label(text="• UVMap1 = (tip.bx, tip.by + 1)")
         linfo.label(text="• Attribute = (0.001, 0.001, random_B, 1)")
         linfo.label(text="    B is a per-face random in [0, 1]")
         linfo.label(text="Set 'Trunk' object input on the modifier!",
                     icon='INFO')
+
+    def _draw_t_tree_rings(self, layout, context):
+        props = context.scene.arantools_tree_rings
+        col = layout.column(align=True)
+
+        col.label(text="Shapes:", icon='MESH_CIRCLE')
+        in_row = col.row(align=True)
+        in_row.alert = props.inner_object is None
+        in_row.prop(props, "inner_object", text="Inner")
+        op = in_row.operator("arantools.tree_rings_set_shape", text="", icon='EYEDROPPER')
+        op.slot = 'INNER'
+        out_row = col.row(align=True)
+        out_row.alert = props.outer_object is None
+        out_row.prop(props, "outer_object", text="Outer")
+        op = out_row.operator("arantools.tree_rings_set_shape", text="", icon='EYEDROPPER')
+        op.slot = 'OUTER'
+        col.label(text="Eyedropper = use active object.", icon='INFO')
+        col.separator()
+
+        col.label(text="Spiral:", icon='FORCE_VORTEX')
+        col.prop(props, "rings")
+        col.prop(props, "points_per_ring")
+        col.prop(props, "start_angle")
+        col.prop(props, "thickness")
+        col.separator()
+
+        col.label(text="Variation:", icon='MOD_NOISE')
+        col.prop(props, "irregularity", slider=True)
+        col.prop(props, "lumpiness")
+        col.prop(props, "ring_drift")
+        col.prop(props, "seed")
+        col.prop(props, "replace_previous")
+
+        ready = props.inner_object is not None and props.outer_object is not None
+        gen = layout.row(align=True)
+        gen.scale_y = 1.4
+        gen.enabled = ready
+        gen.operator("arantools.tree_rings_generate",
+                     text="Generate", icon='FORCE_VORTEX')
+        gen.operator("arantools.tree_rings_randomize",
+                     text="Randomize", icon='FILE_REFRESH')
+        if not ready:
+            layout.label(text="Assign an Inner and Outer shape.", icon='ERROR')
+        else:
+            layout.label(text="Stays inside Outer even when rings overlap.",
+                         icon='INFO')
 
     def _draw_t_tree_inspect(self, layout, context):
         props = context.scene.arantools_tree_inspect
@@ -926,6 +1336,20 @@ class ARANTOOLS_PT_main(Panel):
                       icon='UV_DATA')
         vbox.label(text="Results: info bar summary + clipboard + console.",
                    icon='CONSOLE')
+
+        # ── Hand-edited geonode → source dump ─────────────────────────
+        layout.separator()
+        dbox = layout.box()
+        dbox.label(text="Capture Hand-Edited Geonodes", icon='NODETREE')
+        dbox.label(text="Serializes both UV node groups to JSON",
+                   icon='COPYDOWN')
+        dbox.label(text="(clipboard + tree_uv_geonodes_dump.json).",
+                   icon='BLANK1')
+        drow = dbox.row()
+        drow.scale_y = 1.3
+        drow.operator("arantools.tree_dump_uv_geonodes",
+                      text="Dump UV Geonodes to Clipboard",
+                      icon='NODETREE')
 
     def _draw_t_mod_sync(self, layout, context):
         props = context.scene.arantools_mod_sync
@@ -1325,12 +1749,15 @@ def register():
     weight_tools.register()
     organization.register()
     export.register()
+    baking.register()
     island_flatten.register()
     modifier_sync.register()
     tree_inspect.register()
     tree_branch.register()
     tree_uv_geonode.register()
     tree_tubes_geonode.register()
+    tree_blend_geonode.register()
+    tree_rings.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -1338,9 +1765,10 @@ def register():
             ('WEIGHT',        "", "Weight Tools",   'MOD_VERTEX_WEIGHT',  1),
             ('ORGANIZATION',  "", "Organization",   'OUTLINER',           2),
             ('EXPORT',        "", "Export",         'EXPORT',             3),
-            ('NAMING',        "", "Naming",         'SORTALPHA',          4),
-            ('ANIMATION',     "", "Animation",      'ANIM',               5),
-            ('TREE',          "", "Tree Tools",     'OUTLINER_OB_CURVES', 6),
+            ('BAKING',        "", "Baking",         'NORMALS_FACE',       4),
+            ('NAMING',        "", "Naming",         'SORTALPHA',          5),
+            ('ANIMATION',     "", "Animation",      'ANIM',               6),
+            ('TREE',          "", "Tree Tools",     'OUTLINER_OB_CURVES', 7),
         ],
         default='RIGGING',
     )
@@ -1375,12 +1803,15 @@ def unregister():
         delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    tree_rings.unregister()
+    tree_blend_geonode.unregister()
     tree_tubes_geonode.unregister()
     tree_uv_geonode.unregister()
     tree_branch.unregister()
     tree_inspect.unregister()
     modifier_sync.unregister()
     island_flatten.unregister()
+    baking.unregister()
     export.unregister()
     organization.unregister()
     weight_tools.unregister()

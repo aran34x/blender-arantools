@@ -18,7 +18,9 @@ material functions (MF_VertexColorID + MF_FoliageHeight):
 So this geonode writes (all FACE_CORNER domain):
   - UVMap2    (Float2): (branch_base_z, tree_max_z)
   - UVMap3    (Float2): (0, 1)  — placeholder constant
-  - UVMap1    (Float2): (branch_base_x, branch_base_y)   — raw pivot X/Y
+  - UVMap1    (Float2): (branch_base_x, branch_base_y + 1)
+        The +1 pre-compensates for the shader's Y = (1 - V) * -1 = V - 1
+        axis-flip step, so the shader recovers branch_base_y exactly.
   - Attribute (Color):
         Trunk          (depth 0)  : (0.0001, 0, 0, 1)
         Any branch     (depth ≥1) : (0.001,  0, 0, branch_t)
@@ -185,37 +187,51 @@ def _ensure_geonode_group(rebuild=False):
                  data_type='FLOAT')
     by_attr.inputs['Name'].default_value = 'branch_base_y'
 
-    # Compose UVMap1 = (branch_base_x, branch_base_y) — raw Y, no offset.
+    # Compose UVMap1 = (branch_base_x, branch_base_y + 1)
+    # The +1 pre-compensates for the shader's "Fix Axis" step which does
+    # Y = (1 - V) * -1 = V - 1. We bake V = Y + 1 so the shader recovers
+    # exactly branch_base_y. Without this, every branch's pivot Y is off
+    # by 1m and the tree visibly spirals around a displaced Y axis.
+    by_plus = mk('ShaderNodeMath', -800, 500, operation='ADD')
+    link(by_attr, 'Attribute', by_plus, 0)
+    by_plus.inputs[1].default_value = 1.0
+
     lmap_combine = mk('ShaderNodeCombineXYZ', -600, 500)
     link(bx_attr, 'Attribute', lmap_combine, 'X')
-    link(by_attr, 'Attribute', lmap_combine, 'Y')
+    link(by_plus, 'Value',     lmap_combine, 'Y')
 
-    # ── Store UVMap2 ────────────────────────────────────────────────
-    s_uv2 = mk('GeometryNodeStoreNamedAttribute', 0, 400,
+    # ── Store UVs in TexCoord-INDEX order ───────────────────────────
+    # Blender exports UV layers in their order in `mesh.uv_layers`,
+    # which is the CREATION ORDER. That becomes Unreal's TexCoord index.
+    # The artist UV ('UVMap', auto-created by Curve to Mesh) is already
+    # at index 0. We need:
+    #   index 1 → UVMap1 (pivot X / Y)
+    #   index 2 → UVMap2 (branch_base_z, tree_max_z)
+    #   index 3 → UVMap3 ((0, 1) placeholder)
+    # so we MUST store them in this order on the geometry stream.
+    s_lmap = mk('GeometryNodeStoreNamedAttribute', 0, 500,
+                data_type='FLOAT2', domain='CORNER')
+    s_lmap.inputs['Name'].default_value = 'UVMap1'
+    link(gi,           'Geometry', s_lmap, 'Geometry')
+    link(lmap_combine, 'Vector',   s_lmap, 'Value')
+
+    s_uv2 = mk('GeometryNodeStoreNamedAttribute', 400, 300,
                data_type='FLOAT2', domain='CORNER')
     s_uv2.inputs['Name'].default_value = 'UVMap2'
-    link(gi,          'Geometry', s_uv2, 'Geometry')
+    link(s_lmap,      'Geometry', s_uv2, 'Geometry')
     link(uv2_combine, 'Vector',   s_uv2, 'Value')
 
-    # ── Store UVMap3 ────────────────────────────────────────────────
-    s_uv3 = mk('GeometryNodeStoreNamedAttribute', 400, 200,
+    s_uv3 = mk('GeometryNodeStoreNamedAttribute', 800, 100,
                data_type='FLOAT2', domain='CORNER')
     s_uv3.inputs['Name'].default_value = 'UVMap3'
     link(s_uv2,       'Geometry', s_uv3, 'Geometry')
     link(uv3_combine, 'Vector',   s_uv3, 'Value')
 
-    # ── Store UVMap1 (repurposed as per-branch pivot X / Y) ─────
-    s_lmap = mk('GeometryNodeStoreNamedAttribute', 800, 400,
-                data_type='FLOAT2', domain='CORNER')
-    s_lmap.inputs['Name'].default_value = 'UVMap1'
-    link(s_uv3,        'Geometry', s_lmap, 'Geometry')
-    link(lmap_combine, 'Vector',   s_lmap, 'Value')
-
     # ── Store color "Attribute" = depth-conditional RGBA ─────────────
     s_col = mk('GeometryNodeStoreNamedAttribute', 1200, -100,
                data_type='FLOAT_COLOR', domain='CORNER')
     s_col.inputs['Name'].default_value = 'Attribute'
-    link(s_lmap, 'Geometry', s_col, 'Geometry')
+    link(s_uv3, 'Geometry', s_col, 'Geometry')
     nt.links.new(final_color_socket, s_col.inputs['Value'])
 
     # ── Output ───────────────────────────────────────────────────────
@@ -236,7 +252,8 @@ def _ensure_geonode_group(rebuild=False):
 # Writes (all FACE_CORNER on the leaves mesh):
 #   - UVMap2    : (tip.branch_base_z, tree_max_z)
 #   - UVMap3    : (0, 1)
-#   - UVMap1    : (tip.branch_base_x, tip.branch_base_y)   — raw pivot X/Y
+#   - UVMap1    : (tip.branch_base_x, tip.branch_base_y + 1)
+#       The +1 pre-compensates for the shader's V-axis flip.
 #   - Attribute : (0.001, 0.001, random_per_face, 1)
 #         B is a 0-1 random value indexed by face (per-leaf flutter
 #         amplitude). R and G match the reference's tiny constant.
@@ -353,10 +370,16 @@ def _ensure_leaves_geonode_group(rebuild=False):
     uv3.inputs['X'].default_value = 0.0
     uv3.inputs['Y'].default_value = 1.0
 
-    # UVMap1 = (tip_bx, tip_by)   — raw pivot, no offset
+    # UVMap1 = (tip_bx, tip_by + 1) — same +1 axis-flip pre-compensation
+    # as the wood geonode. Without it, leaves bend around a Y axis that
+    # is shifted by 1m, producing the spiral artifact.
+    by_plus = mk('ShaderNodeMath', -1300, 400, operation='ADD')
+    link(tip_by, 'Value', by_plus, 0)
+    by_plus.inputs[1].default_value = 1.0
+
     lmap = mk('ShaderNodeCombineXYZ', -1100, 400)
     link(tip_bx, 'Value', lmap, 'X')
-    link(tip_by, 'Value', lmap, 'Y')
+    link(by_plus, 'Value', lmap, 'Y')
 
     # ── Color = (0.001, 0.001, curve(random_per_face), 1) ────────────
     # B is a per-face random value in [0, 1], remapped through a
@@ -413,29 +436,33 @@ def _ensure_leaves_geonode_group(rebuild=False):
 
     final_color_socket = _mix_color_output(mix_b)
 
-    # ── Store all the attrs in sequence ──────────────────────────────
-    s_uv2 = mk('GeometryNodeStoreNamedAttribute', 0, 200,
+    # ── Store UVs in TexCoord-INDEX order ───────────────────────────
+    # Same FBX-creation-order rule as the wood geonode:
+    #   index 1 → UVMap1 (pivot X / Y)
+    #   index 2 → UVMap2 (branch_base_z, tree_max_z)
+    #   index 3 → UVMap3 ((0, 1) placeholder)
+    s_lmap = mk('GeometryNodeStoreNamedAttribute', 0, 300,
+                data_type='FLOAT2', domain='CORNER')
+    s_lmap.inputs['Name'].default_value = 'UVMap1'
+    link(gi,   'Geometry', s_lmap, 'Geometry')
+    link(lmap, 'Vector',   s_lmap, 'Value')
+
+    s_uv2 = mk('GeometryNodeStoreNamedAttribute', 300, 200,
                data_type='FLOAT2', domain='CORNER')
     s_uv2.inputs['Name'].default_value = 'UVMap2'
-    link(gi,  'Geometry', s_uv2, 'Geometry')
-    link(uv2, 'Vector',   s_uv2, 'Value')
+    link(s_lmap, 'Geometry', s_uv2, 'Geometry')
+    link(uv2,    'Vector',   s_uv2, 'Value')
 
-    s_uv3 = mk('GeometryNodeStoreNamedAttribute', 300, 100,
+    s_uv3 = mk('GeometryNodeStoreNamedAttribute', 600, 100,
                data_type='FLOAT2', domain='CORNER')
     s_uv3.inputs['Name'].default_value = 'UVMap3'
     link(s_uv2, 'Geometry', s_uv3, 'Geometry')
     link(uv3,   'Vector',   s_uv3, 'Value')
 
-    s_lmap = mk('GeometryNodeStoreNamedAttribute', 600, 300,
-                data_type='FLOAT2', domain='CORNER')
-    s_lmap.inputs['Name'].default_value = 'UVMap1'
-    link(s_uv3, 'Geometry', s_lmap, 'Geometry')
-    link(lmap,  'Vector',   s_lmap, 'Value')
-
     s_col = mk('GeometryNodeStoreNamedAttribute', 900, -100,
                data_type='FLOAT_COLOR', domain='CORNER')
     s_col.inputs['Name'].default_value = 'Attribute'
-    link(s_lmap, 'Geometry', s_col, 'Geometry')
+    link(s_uv3, 'Geometry', s_col, 'Geometry')
     nt.links.new(final_color_socket, s_col.inputs['Value'])
 
     link(s_col, 'Geometry', go, 'Geometry')
@@ -535,6 +562,95 @@ class ARANTOOLS_OT_TreeRebuildLeavesUVGeonode(Operator):
         return {'FINISHED'}
 
 
+# ── Canonical UV layer order expected by the Unreal shader ──────────
+# index 0 = artist UVs, 1 = pivot X/Y, 2 = (base_z, max_z), 3 = (0,1).
+_CANONICAL_UV_ORDER = ('UVMap', 'UVMap1', 'UVMap2', 'UVMap3')
+
+
+def _reorder_uv_layers(mesh, target_order):
+    """Force mesh.uv_layers into target_order. Blender's UV API has no
+    direct .move(), so we snapshot the per-loop UV data, drop every
+    layer, then recreate them in the desired sequence. Layers not in
+    target_order are appended at the end in their original encounter
+    order so we never lose data."""
+    snapshots = {}
+    for layer in mesh.uv_layers:
+        snapshots[layer.name] = [tuple(d.uv) for d in layer.data]
+
+    active_name = (mesh.uv_layers.active.name
+                   if mesh.uv_layers.active else None)
+    render_name = next((l.name for l in mesh.uv_layers
+                        if getattr(l, 'active_render', False)), None)
+
+    # Sequence: every target name that exists, then any leftovers in
+    # their original order.
+    seq = [n for n in target_order if n in snapshots]
+    seq.extend(n for n in snapshots if n not in seq)
+
+    # Remove all UV layers.
+    while mesh.uv_layers:
+        mesh.uv_layers.remove(mesh.uv_layers[0])
+
+    # Recreate in order, restoring per-loop values.
+    for name in seq:
+        new = mesh.uv_layers.new(name=name)
+        if new is None:
+            continue
+        data = snapshots[name]
+        for i, uv in enumerate(data):
+            if i < len(new.data):
+                new.data[i].uv = uv
+
+    # Restore active + active_render where possible.
+    if active_name and active_name in mesh.uv_layers:
+        mesh.uv_layers[active_name].active = True
+    if render_name and render_name in mesh.uv_layers:
+        mesh.uv_layers[render_name].active_render = True
+
+    return seq
+
+
+class ARANTOOLS_OT_TreeFixUVOrder(Operator):
+    """Force the selected mesh's UV layers into the canonical order
+the SpeedTree-style Unreal shader expects:
+
+    [0] UVMap   (artist texture UVs)
+    [1] UVMap1  (per-branch pivot X/Y)
+    [2] UVMap2  (branch_base_z, tree_max_z)
+    [3] UVMap3  ((0, 1) placeholder)
+
+Run this AFTER Convert-to-Mesh / Apply Modifiers if the layer order
+got jumbled. Any UV layers with other names are appended at the end
+in their original order so no data is lost."""
+    bl_idname  = "arantools.tree_fix_uv_order"
+    bl_label   = "Fix UV Layer Order"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        targets = [o for o in context.selected_objects if o.type == 'MESH']
+        if not targets:
+            self.report({'ERROR'}, "Select at least one mesh.")
+            return {'CANCELLED'}
+        reordered = []
+        for obj in targets:
+            if not obj.data.uv_layers:
+                continue
+            seq = _reorder_uv_layers(obj.data, _CANONICAL_UV_ORDER)
+            reordered.append((obj.name, seq))
+        if not reordered:
+            self.report({'WARNING'}, "No mesh had any UV layers to reorder.")
+            return {'CANCELLED'}
+        first_seq = reordered[0][1]
+        self.report({'INFO'},
+                    f"Reordered {len(reordered)} mesh(es). "
+                    f"New order: {' → '.join(first_seq)}")
+        return {'FINISHED'}
+
+
 # ============================================================================
 # Registration
 # ============================================================================
@@ -544,6 +660,7 @@ classes = [
     ARANTOOLS_OT_TreeRebuildUVGeonode,
     ARANTOOLS_OT_TreeAddLeavesUVGeonode,
     ARANTOOLS_OT_TreeRebuildLeavesUVGeonode,
+    ARANTOOLS_OT_TreeFixUVOrder,
 ]
 
 

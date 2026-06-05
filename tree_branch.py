@@ -141,6 +141,13 @@ _ATTR_SPEC = [
     ("branch_base_y",  'FLOAT',   'POINT'),
     ("branch_base_z",  'FLOAT',   'POINT'),
     ("branch_top_z",   'FLOAT',   'POINT'),
+    # Position of the parent's junction vertex (the parent-side endpoint
+    # of the deleted bridge edge). Used by the Branch Blend geonode to
+    # snap each child branch's bottom ring onto the parent's tube wall.
+    # For the trunk (no parent) these stay at (0, 0, 0).
+    ("parent_junction_x", 'FLOAT', 'POINT'),
+    ("parent_junction_y", 'FLOAT', 'POINT'),
+    ("parent_junction_z", 'FLOAT', 'POINT'),
     # Any vertex whose Z sits below the root vertex's Z is an underground
     # root and the wind UV geonode masks it out (zero amplitude).
     ("is_underground", 'BOOLEAN', 'POINT'),
@@ -528,6 +535,9 @@ reads the current selection. Run again after edits to re-analyze."""
         branch_base_y  = [0.0]   * n_v
         branch_base_z  = [0.0]   * n_v
         branch_top_z   = [0.0]   * n_v
+        parent_junction_x = [0.0] * n_v
+        parent_junction_y = [0.0] * n_v
+        parent_junction_z = [0.0] * n_v
         # Use the root vertex's Z as the ground threshold — anything strictly
         # below that is a root/underground vertex and gets wind-masked.
         root_z = root.co.z
@@ -596,6 +606,16 @@ reads the current selection. Run again after edits to re-analyze."""
             b_min_z = base_z   # legacy alias — pivot Z is branch start Z
             b_max_z = max(bm.verts[vi].co.z for vi in verts_in_branch)
 
+            # Parent junction position — the parent-side endpoint of the
+            # bridge edge that was deleted to disconnect this branch from
+            # its parent. For the trunk (entry_vert_idx == -1) we leave
+            # this at (0, 0, 0) since there's no parent.
+            if b["entry_vert_idx"] >= 0:
+                pj_v = bm.verts[b["entry_vert_idx"]]
+                pj_x, pj_y, pj_z = pj_v.co.x, pj_v.co.y, pj_v.co.z
+            else:
+                pj_x = pj_y = pj_z = 0.0
+
             for i, vi in enumerate(verts_in_branch):
                 t = i / max(1, count - 1)
                 # Per-VERTEX curve selection: any vertex below root_z
@@ -616,6 +636,9 @@ reads the current selection. Run again after edits to re-analyze."""
                 branch_base_y[vi] = base_y
                 branch_base_z[vi] = b_min_z
                 branch_top_z[vi]  = b_max_z
+                parent_junction_x[vi] = pj_x
+                parent_junction_y[vi] = pj_y
+                parent_junction_z[vi] = pj_z
 
             # Internal edges: consecutive verts inside this branch.
             for i in range(count - 1):
@@ -671,6 +694,9 @@ reads the current selection. Run again after edits to re-analyze."""
             "branch_base_y":   branch_base_y,
             "branch_base_z":   branch_base_z,
             "branch_top_z":    branch_top_z,
+            "parent_junction_x": parent_junction_x,
+            "parent_junction_y": parent_junction_y,
+            "parent_junction_z": parent_junction_z,
             "is_underground":  is_underground,
         }
         for name, dtype, domain in _ATTR_SPEC:

@@ -685,6 +685,205 @@ your own."""
 
 
 # ============================================================================
+# Node-group serializer — dump a live (potentially hand-edited) node
+# group to JSON so the addon's Python source can be rewritten to match
+# the artist's edits exactly. The dump captures everything the
+# `_ensure_*_geonode_group()` builders need to reproduce the graph:
+#  - interface (group inputs/outputs)
+#  - every node (bl_idname, location, all enum/bool/etc settings,
+#    input default values, embedded CurveMappings)
+#  - every link (from_node.socket → to_node.socket, by name)
+# ============================================================================
+
+_DUMP_NODE_PROPS = (
+    # Common per-node settings we care about, harmless to read on nodes
+    # that don't have them (we hasattr-guard each access).
+    'operation', 'data_type', 'mode', 'input_type', 'domain',
+    'use_clamp', 'clamp_type', 'transform_space', 'blend_type',
+    'factor_mode', 'rotation_type', 'rotation_space', 'sample_mode',
+    'fill_caps', 'attribute_clamp', 'invert',
+)
+
+
+def _socket_default(sock):
+    """Capture an input socket's default_value, if any. Lists for vector
+    / color types, scalar otherwise. Skip if linked (incoming wire wins)."""
+    if sock.is_linked:
+        return None
+    if not hasattr(sock, 'default_value'):
+        return None
+    try:
+        v = sock.default_value
+    except Exception:
+        return None
+    if hasattr(v, '__iter__') and not isinstance(v, (str, bytes)):
+        return list(v)
+    return v
+
+
+def _dump_node_group(ng):
+    """Serialize one node group to a plain-dict structure (JSON-able)."""
+    if ng is None:
+        return None
+    data = {
+        "name": ng.name,
+        "type": ng.bl_idname,
+        "interface": [],
+        "nodes": [],
+        "links": [],
+    }
+    # ── Interface (group sockets) ────────────────────────────────────
+    for item in ng.interface.items_tree:
+        entry = {
+            "name": item.name,
+            "item_type": item.item_type,           # 'SOCKET' or 'PANEL'
+            "in_out": getattr(item, 'in_out', None),
+            "socket_type": getattr(item, 'socket_type', None),
+            "bl_socket_idname": getattr(item, 'bl_socket_idname', None),
+            "description": getattr(item, 'description', ''),
+        }
+        for attr in ('default_value', 'min_value', 'max_value',
+                     'subtype'):
+            if hasattr(item, attr):
+                try:
+                    v = getattr(item, attr)
+                    if hasattr(v, '__iter__') and not isinstance(v, (str, bytes)):
+                        entry[attr] = list(v)
+                    else:
+                        entry[attr] = v
+                except Exception:
+                    pass
+        data["interface"].append(entry)
+
+    # ── Nodes ────────────────────────────────────────────────────────
+    for n in ng.nodes:
+        entry = {
+            "name": n.name,
+            "bl_idname": n.bl_idname,
+            "label": n.label,
+            "location": [round(n.location[0], 2), round(n.location[1], 2)],
+            "width": round(n.width, 2),
+            "hide": n.hide,
+            "inputs": [],
+            "outputs": [],
+        }
+        for attr in _DUMP_NODE_PROPS:
+            if hasattr(n, attr):
+                try:
+                    entry[attr] = getattr(n, attr)
+                except Exception:
+                    pass
+        # Capture per-input default values when not linked.
+        for sock in n.inputs:
+            sentry = {
+                "name": sock.name,
+                "identifier": sock.identifier,
+                "type": sock.bl_idname,
+                "linked": sock.is_linked,
+            }
+            dv = _socket_default(sock)
+            if dv is not None:
+                sentry["default_value"] = dv
+            entry["inputs"].append(sentry)
+        # Output socket names — useful for round-tripping by-name links.
+        for sock in n.outputs:
+            entry["outputs"].append({
+                "name": sock.name,
+                "identifier": sock.identifier,
+                "type": sock.bl_idname,
+            })
+        # ShaderNodeFloatCurve / ShaderNodeRGBCurve embed a CurveMapping.
+        if hasattr(n, 'mapping') and n.mapping is not None:
+            try:
+                cm = n.mapping
+                curves = []
+                for c in cm.curves:
+                    pts = []
+                    for p in c.points:
+                        pts.append({
+                            "location": [round(p.location[0], 4),
+                                         round(p.location[1], 4)],
+                            "handle_type": p.handle_type,
+                        })
+                    curves.append(pts)
+                entry["mapping"] = {
+                    "curves": curves,
+                    "use_clip": cm.use_clip,
+                    "clip_min_x": cm.clip_min_x,
+                    "clip_max_x": cm.clip_max_x,
+                    "clip_min_y": cm.clip_min_y,
+                    "clip_max_y": cm.clip_max_y,
+                }
+            except Exception:
+                pass
+        # Special-case: GeometryNodeInputNamedAttribute exposes the
+        # target attribute name via a Name input that we already capture
+        # above. Nothing extra to do.
+        data["nodes"].append(entry)
+
+    # ── Links ────────────────────────────────────────────────────────
+    for link in ng.links:
+        data["links"].append({
+            "from_node": link.from_node.name,
+            "from_socket": link.from_socket.name,
+            "from_identifier": link.from_socket.identifier,
+            "to_node": link.to_node.name,
+            "to_socket": link.to_socket.name,
+            "to_identifier": link.to_socket.identifier,
+        })
+
+    return data
+
+
+class ARANTOOLS_OT_TreeDumpUVNodeGroups(Operator):
+    """Serialize the live `AranTools_TreeBranchUV` and
+`AranTools_TreeLeavesUV` node groups (whatever state they're in right
+now, including any hand-edits) to a JSON blob and copy it to the
+clipboard. Paste that JSON to Claude and the addon's Python source can
+be rewritten to reproduce the exact graph from now on."""
+    bl_idname  = "arantools.tree_dump_uv_geonodes"
+    bl_label   = "Dump UV Geonodes (to clipboard)"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        wood = bpy.data.node_groups.get('AranTools_TreeBranchUV')
+        leaves = bpy.data.node_groups.get('AranTools_TreeLeavesUV')
+        if wood is None and leaves is None:
+            self.report({'ERROR'},
+                        "Neither AranTools_TreeBranchUV nor "
+                        "AranTools_TreeLeavesUV node group found.")
+            return {'CANCELLED'}
+        dump = {
+            "blender": bpy.app.version_string,
+            "wood":   _dump_node_group(wood),
+            "leaves": _dump_node_group(leaves),
+        }
+        text = json.dumps(dump, indent=2, default=str)
+        # Also write to disk next to the inspect output for safekeeping.
+        try:
+            props = context.scene.arantools_tree_inspect
+            out_dir = bpy.path.abspath(props.output_folder)
+            os.makedirs(out_dir, exist_ok=True)
+            file_path = os.path.join(out_dir, "tree_uv_geonodes_dump.json")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            disk_msg = f" + saved to {file_path}"
+        except Exception as e:
+            disk_msg = f" (disk save failed: {e})"
+        try:
+            context.window_manager.clipboard = text
+        except Exception as e:
+            self.report({'ERROR'}, f"Clipboard copy failed: {e}")
+            return {'CANCELLED'}
+        n_wood   = len(dump['wood']['nodes'])   if wood   else 0
+        n_leaves = len(dump['leaves']['nodes']) if leaves else 0
+        self.report({'INFO'},
+                    f"Dumped wood({n_wood} nodes) + leaves({n_leaves} "
+                    f"nodes) to clipboard{disk_msg}")
+        return {'FINISHED'}
+
+
+# ============================================================================
 # UV validator — checks that the final evaluated mesh carries the
 # SpeedTree-style wind/identification encoding produced by the Branch
 # Tubes + Branch UV geonodes:
@@ -1143,6 +1342,7 @@ classes = [
     ARANTOOLS_PG_TreeInspect,
     ARANTOOLS_OT_TreeInspect,
     ARANTOOLS_OT_TreeValidateUVs,
+    ARANTOOLS_OT_TreeDumpUVNodeGroups,
 ]
 
 

@@ -179,3 +179,10 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# -- Blender / extension --
+/repo/
+*.zip
+*.blend
+*.blend1
+/tree_uv_geonodes_dump.json
+/.claude/
