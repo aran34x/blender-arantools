@@ -1,11 +1,13 @@
 name: Build & Publish Extension
 
 # Publishes the extension repository (index.json + zip) to GitHub Pages so
-# Blender clients can auto-update. Triggers when you push a version tag
-# (e.g. `git tag v0.2.1 && git push --tags`) or run it manually.
+# Blender clients can auto-update. Runs on every push to main (the github-pages
+# environment only allows deploys from main, not from tags) or manually.
+# The extension version comes from blender_manifest.toml — bump it to ship an
+# update, then push main.
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:

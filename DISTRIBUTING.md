@@ -3,7 +3,7 @@
 Blender 4.2+ installs this add-on as an **extension** and checks a repository
 URL for updates on startup. We serve that repository for free from **GitHub
 Pages** — a GitHub Action rebuilds the zip and the `index.json` every time you
-push a version tag. A teammate adds one URL once; after that updates are
+push to `main`. A teammate adds one URL once; after that updates are
 automatic.
 
 **Repo:** https://github.com/aran34x/blender-arantools
@@ -18,61 +18,46 @@ Pieces in this folder that make it work:
 
 ## Current status
 
-Already done (this is the live working copy — the **Blender 5.1** folder; the
-4.5 folder has been disconnected from GitHub):
+This is the live working copy — the **Blender 5.1** folder; the 4.5 folder has
+been disconnected from GitHub. The repo is **public**, Pages **Source = GitHub
+Actions**, and the workflow runs on every push to `main`.
 
-- Repo created, `main` pushed, and tag `v0.2.0` pushed (which triggered the
-  build workflow).
-
-Two settings still needed in the browser before the feed goes live — see next
-section.
-
----
-
-## Finish setup (you, one time — in the browser)
+If you ever set this up fresh, the one-time browser steps are:
 
 1. **Make the repo public.** GitHub Pages does not serve a *private* repo on
-   the free plan. On `github.com/aran34x/blender-arantools`:
-   **Settings ▸ General ▸ Danger Zone ▸ Change visibility ▸ Public**.
-   (The add-on is GPL, so public is fine. To stay private you need GitHub
-   Pro/Team.)
+   the free plan. **Settings ▸ General ▸ Danger Zone ▸ Change visibility ▸
+   Public**. (The add-on is GPL, so public is fine; to stay private you need
+   GitHub Pro/Team.)
 
-2. **Enable Pages via Actions.**
-   **Settings ▸ Pages ▸ Build and deployment ▸ Source = GitHub Actions**.
+2. **Enable Pages via Actions.** **Settings ▸ Pages ▸ Build and deployment ▸
+   Source = GitHub Actions**.
 
-3. **Re-run the build.** The run triggered by the `v0.2.0` tag probably failed
-   on the deploy step because Pages wasn't enabled yet. Go to the **Actions**
-   tab ▸ *Build & Publish Extension* ▸ latest run ▸ **Re-run all jobs**.
+That's it — no secrets/tokens. Pushing `main` then builds and deploys, and the
+feed goes live at `https://aran34x.github.io/blender-arantools/index.json`.
 
-When it goes green, the feed is live at
-`https://aran34x.github.io/blender-arantools/index.json`.
-
-No secrets/tokens needed — the workflow uses the repo's built-in Pages
-permissions.
+> Note: the auto-created `github-pages` environment only allows deploys from
+> `main`, which is why the workflow triggers on `main` (not on tags).
 
 ---
 
 ## Publishing a new version (you, each release)
 
+Every push to `main` rebuilds and republishes the feed. To ship an update
+clients will actually install, bump the `version` first.
+
 **Shortcut:** bump `version` in `blender_manifest.toml`, then double-click
-`publish.bat` (or run `publish.bat "my message"`). It commits, pushes `main`,
-and — if the version is new — creates and pushes the matching `v<version>` tag
-that triggers the build. If you only changed code (same version) it just
-pushes `main` without making a release.
+`publish.bat` (or run `publish.bat "my message"`). It commits and pushes
+`main`, which triggers the build + deploy.
 
 Manual equivalent:
 
-1. Bump `version` in `blender_manifest.toml` (e.g. `0.2.0` → `0.2.1`).
-2. Commit, then tag and push:
+```
+git commit -am "v0.2.1"
+git push origin main
+```
 
-   ```
-   git commit -am "v0.2.1"
-   git push origin main
-   git tag v0.2.1
-   git push origin v0.2.1
-   ```
-
-Each new tag rebuilds and republishes the feed; clients are offered the update.
+No tags needed — the `github-pages` environment only allows deploys from
+`main`, and the extension version comes from the manifest, not from tags.
 
 ---
 
