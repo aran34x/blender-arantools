@@ -734,9 +734,18 @@ then restore the scene."""
 
         targets = {}
         if props.assign_to_material:
-            for low, _h, _c in members:
-                if low not in targets:
-                    targets[low] = _prepare_target_material(low)
+            if props.grouping == 'MATERIAL':
+                # Every member of a by-material job already shares one material;
+                # wire the baked normal into that single material in place —
+                # don't copy it per object (which would spawn duplicate preview
+                # materials and unshare the original).
+                shared = members[0][0].active_material if members else None
+                if shared is not None:
+                    targets[shared.name] = shared
+            else:
+                for low, _h, _c in members:
+                    mat = _prepare_target_material(low)
+                    targets[mat.name] = mat
 
         for i, (low, high, cage) in enumerate(members):
             do_clear = (i == 0)
