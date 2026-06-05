@@ -50,6 +50,7 @@ and enable it in **Preferences ▸ Add-ons**.
 - [Animation](#animation)
   - [Noise on Bones](#noise-on-bones)
 - [Tree Tools](#tree-tools)
+- [Extras](#extras)
   - [Wood Ring Spiral](#wood-ring-spiral)
 
 ---
@@ -565,7 +566,13 @@ Each click re-applies the modifier with a new random phase offset, so clicking a
 
 ## Tree Tools
 
-The **Tree** tab holds geometry-node-based tree/foliage authoring tools — Branch Skeleton, Branch Tubes, Branch UV, Branch Blend, and the Tree Inspector — plus the wood-grain generator below.
+The **Tree** tab holds geometry-node-based tree/foliage authoring tools — Branch Skeleton, Branch Tubes, Branch UV, Branch Blend, and the Tree Inspector.
+
+---
+
+## Extras
+
+The **Extras** tab holds standalone tools that don't belong to a specific pipeline.
 
 ### Wood Ring Spiral
 
@@ -573,20 +580,53 @@ Generates a randomizable growth-ring spiral between an **inner** and an **outer*
 
 The spiral is mathematically guaranteed **never to cross the outer boundary** — even when the rings overlap — because each point is a clamped blend between the inner and outer boundary measured along the same radial direction. Rings also morph in shape from the inner silhouette to the outer one as they expand.
 
-**How to use:**
+#### Multiple spirals
 
-1. Assign an **Inner** and **Outer** shape (the eyedropper buttons grab the active object).
-2. Set **Rings**, **Points / Ring**, and the variation controls.
-3. Click **Generate**, or **Randomize** for a fresh seed/variant each click.
+The tool manages a **list of spiral pairs**, each with its own Inner/Outer shapes, its own full settings, and its own generated curve object. Use the buttons beside the list to **Add**, **Remove**, **Duplicate** (copies all settings *and* the irregularity curve, then builds a fresh spiral), and **reorder** pairs. Double-click a list entry to rename it. **Generate** / **Randomize** act on the selected pair; **Generate All** rebuilds every pair at once.
 
-**Variation:**
+#### How to use
+
+1. **Add** a spiral pair.
+2. Assign an **Inner** and **Outer** shape (the eyedropper buttons grab the active object).
+3. Set **Rings**, **Points / Ring**, and the variation controls.
+4. Click **Generate**, or **Randomize** for a fresh seed/variant each click.
+
+#### Live update
+
+With **Live Update** on (global toggle), the selected spiral rebuilds automatically as you drag any slider, **and** it follows the Inner/Outer shapes when you move them or edit their vertices in **Edit Mode** — so you can sculpt the boundary and watch the rings re-fit in real time. Live update auto-pauses for very heavy spirals (above ~20 000 points); the panel tells you, and you just press **Generate** for those. *(Editing the irregularity curve does not live-update — press Generate after reshaping it.)*
+
+#### Spiral & variation settings (per pair)
 
 | Property | Description |
 | --- | --- |
-| **Irregularity** | Random radial wobble as a fraction of one ring's spacing; `>1` lets rings overlap |
+| **Rings** | Number of turns from the inner shape to the outer shape |
+| **Points / Ring** | Spiral resolution per turn (higher = smoother) |
+| **Start Angle** | Rotates where the spiral begins |
+| **Line Thickness** | Curve bevel depth, for a visible solid tube (`0` = wire) |
+| **Z Rise** | Lifts the spiral along its plane normal across its length (inner = 0 → outer = full), turning it into a gentle helix so no part overlaps another in 3D — see below |
+| **Connect Ends** | Seamlessly merges the loose inner/outer tips into the neighbouring run — see below |
+| **Merge Length** | (with Connect Ends) how far, in turns, each end wraps while blending in |
+| **Irregularity** | Overall random radial wobble as a fraction of one ring's spacing; `>1` lets rings overlap |
+| **Irregularity over length** | A curve mapping radial position (0 = inner → 1 = outer) to a wobble multiplier — see below |
 | **Lumpiness** | Angular frequency of the wobble (few broad lobes → many small bumps) |
 | **Ring Drift** | How much the wobble changes ring-to-ring; `0` = perfectly nested |
 | **Seed** | Change for a different variant |
-| **Replace Previous** | Replace the last generated spiral instead of adding a new one |
 
-Output is a curve object (`WoodSpiral`) on the shapes' plane — ideal as a source to bake into a normal map.
+#### Connect Ends — seamless, exact joins
+
+Turning **Connect Ends** on tucks the loose inner and outer tips in. Instead of a straight connector, each end **wraps an extra fraction of a turn** (set by **Merge Length**) while easing radially onto a real vertex one run away, and its final point lands **exactly** on that vertex — matching X, Y *and* Z. The result feeds precisely into the previous line with no gap, no offset, and (because the easing flattens at the landing) a tangent join rather than a spike. Needs at least 2 rings.
+
+#### Irregularity over length curve
+
+Each pair has a **Float Curve** (created on first **Add**, or via the **Add Irregularity Curve** button on older pairs) that scales the wobble along the spiral's radius — **X = 0 at the inner boundary → 1 at the outer**, **Y = wobble multiplier**. Pull the left point down to **0** to lock the innermost points exactly onto your Inner shape (e.g. a precise small hole), then ramp irregularity up as the rings expand. **Reset Curve** restores the flat default. Reshaping the curve isn't live — press **Generate** afterwards.
+
+#### Z Rise and the length value (for shaders / Unreal)
+
+The spiral is one continuous curve from the inner start to the outer end, so its **0→1-along-length value** is available without baking:
+
+- In **Geometry Nodes**, read the **Spline Parameter → Factor** output.
+- In a **shader / Unreal**, give the spiral a **Line Thickness > 0** to bevel it into a tube, then read **Texture Coordinate → UV** (one channel runs 0→1 along the length, the other wraps around the tube).
+
+**Z Rise** pairs with this for animation: lifting the spiral into a gentle helix means every point along the length sits at a unique height, so as a shader sweeps the 0→1 length value the revealed portion never intersects other parts of the spiral. (With **Connect Ends** on, the merge still feeds exactly into the previous line — it returns to that line's exact height at the join.)
+
+Each pair outputs a curve object (named after the pair) on the shapes' plane — ideal as a source to bake into a normal map or drive a wood-grain material.

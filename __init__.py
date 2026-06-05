@@ -90,7 +90,6 @@ _TOOL_REGISTRY = [
     ('tree_tubes',     'Branch Tubes Geonode',   'Add a Geometry Nodes modifier that sweeps a circular profile along each branch of a skeleton, producing closed-tip / open-base tubes with auto UV0', 'TREE', 'MESH_CYLINDER', '_draw_t_tree_tubes', False),
     ('tree_uv',        'Branch UV Geonode',      'Add a Geometry Nodes modifier that bakes wind/identification UVs (UVMap2, UVMap3) and the vertex-color Attribute onto a branch mesh, matching the SpeedTree-style encoding', 'TREE', 'NODETREE', '_draw_t_tree_uv',     False),
     ('tree_blend',     'Branch Blend Geonode',   'Weld the disconnected per-branch tubes into one connected mesh — pulls each child branch base ring inward to its junction point and merges by distance, preserving UVs and color attributes', 'TREE', 'MOD_REMESH',         '_draw_t_tree_blend',     False),
-    ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'TREE', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
     ('tree_inspect',   'Tree Inspector',         'Dump UV layers, vertex colors, materials, modifiers, and collection hierarchy as a JSON report for reverse-engineering foliage/tree setups', 'TREE', 'VIEWZOOM',          '_draw_t_tree_inspect',   False),
     ('arp_export',     'ARP Batch Export',       'Export selected meshes as FBX files using Auto-Rig Pro naming conventions',       'EXPORT',       'EXPORT',             '_draw_t_arp_export',     False),
     ('export_sets',    'ARP Export Sets',        'Group meshes into named sets and batch-export each as its own FBX via Auto-Rig Pro. Overwrites existing files', 'EXPORT', 'GROUP',          '_draw_t_export_sets',    False),
@@ -101,6 +100,7 @@ _TOOL_REGISTRY = [
     ('anim_org',       'Animation Organization', 'Manage an armature\'s actions: list, create (with Fake User), and auto-set the timeline from a "_NNN" duration suffix', 'ANIMATION', 'ACTION',           '_draw_t_anim_org',       False),
     ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
+    ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'EXTRAS', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
 ]
 
 # Only collapsible (non-small) tools need a BoolProperty
@@ -149,6 +149,7 @@ class ARANTOOLS_PT_main(Panel):
             'NAMING':       ('Naming',       'SORTALPHA'),
             'ANIMATION':    ('Animation',    'ANIM'),
             'TREE':         ('Tree Tools',   'OUTLINER_OB_CURVES'),
+            'EXTRAS':       ('Extras',       'PLUS'),
         }
         tab_name, tab_icon = tab_info[scene.arantools_active_tab]
         layout.label(text=tab_name, icon=tab_icon)
@@ -170,6 +171,7 @@ class ARANTOOLS_PT_main(Panel):
             ('NAMING',       'SORTALPHA',         'COLORSET_03_VEC'),
             ('ANIMATION',    'ANIM',              'COLORSET_05_VEC'),
             ('TREE',         'OUTLINER_OB_CURVES','COLORSET_04_VEC'),
+            ('EXTRAS',       'PLUS',              'COLORSET_07_VEC'),
         ]
 
         for tab_value, tab_icon, color_icon in tabs:
@@ -223,6 +225,7 @@ class ARANTOOLS_PT_main(Panel):
             'NAMING':       ('Naming',       'SORTALPHA'),
             'ANIMATION':    ('Animation',    'ANIM'),
             'TREE':         ('Tree Tools',   'OUTLINER_OB_CURVES'),
+            'EXTRAS':       ('Extras',       'PLUS'),
         }
         found = False
         current_tab = None
@@ -1238,38 +1241,86 @@ class ARANTOOLS_PT_main(Panel):
                     icon='INFO')
 
     def _draw_t_tree_rings(self, layout, context):
-        props = context.scene.arantools_tree_rings
-        col = layout.column(align=True)
+        container = context.scene.arantools_tree_rings
+
+        # ── Pair manager (list + side buttons) ───────────────────────────────
+        list_row = layout.row()
+        list_row.template_list(
+            "ARANTOOLS_UL_spiral_pairs", "",
+            container, "pairs",
+            container, "active_index",
+            rows=3,
+        )
+        side = list_row.column(align=True)
+        side.operator("arantools.tree_rings_add", text="", icon='ADD')
+        side.operator("arantools.tree_rings_remove", text="", icon='REMOVE')
+        side.separator()
+        side.operator("arantools.tree_rings_duplicate", text="", icon='DUPLICATE')
+        side.separator()
+        side.operator("arantools.tree_rings_move", text="", icon='TRIA_UP').direction = 'UP'
+        side.operator("arantools.tree_rings_move", text="", icon='TRIA_DOWN').direction = 'DOWN'
+
+        layout.prop(container, "live_update")
+
+        idx = container.active_index
+        if not (0 <= idx < len(container.pairs)):
+            layout.label(text="Add a spiral pair to begin.", icon='INFO')
+            return
+        item = container.pairs[idx]
+
+        # ── Selected pair's settings ─────────────────────────────────────────
+        box = layout.box()
+        col = box.column(align=True)
 
         col.label(text="Shapes:", icon='MESH_CIRCLE')
         in_row = col.row(align=True)
-        in_row.alert = props.inner_object is None
-        in_row.prop(props, "inner_object", text="Inner")
+        in_row.alert = item.inner_object is None
+        in_row.prop(item, "inner_object", text="Inner")
         op = in_row.operator("arantools.tree_rings_set_shape", text="", icon='EYEDROPPER')
         op.slot = 'INNER'
         out_row = col.row(align=True)
-        out_row.alert = props.outer_object is None
-        out_row.prop(props, "outer_object", text="Outer")
+        out_row.alert = item.outer_object is None
+        out_row.prop(item, "outer_object", text="Outer")
         op = out_row.operator("arantools.tree_rings_set_shape", text="", icon='EYEDROPPER')
         op.slot = 'OUTER'
         col.label(text="Eyedropper = use active object.", icon='INFO')
         col.separator()
 
         col.label(text="Spiral:", icon='FORCE_VORTEX')
-        col.prop(props, "rings")
-        col.prop(props, "points_per_ring")
-        col.prop(props, "start_angle")
-        col.prop(props, "thickness")
+        col.prop(item, "rings")
+        col.prop(item, "points_per_ring")
+        col.prop(item, "start_angle")
+        col.prop(item, "thickness")
+        col.prop(item, "z_rise")
+        col.prop(item, "connect_ends")
+        if item.connect_ends:
+            col.prop(item, "connect_blend")
         col.separator()
 
         col.label(text="Variation:", icon='MOD_NOISE')
-        col.prop(props, "irregularity", slider=True)
-        col.prop(props, "lumpiness")
-        col.prop(props, "ring_drift")
-        col.prop(props, "seed")
-        col.prop(props, "replace_previous")
+        col.prop(item, "irregularity", slider=True)
 
-        ready = props.inner_object is not None and props.outer_object is not None
+        # Irregularity-along-length curve (0 = inner → 1 = outer). Pin it to 0
+        # at the left to lock the innermost points onto the Inner shape.
+        curve_node = tree_rings._get_item_curve_node(item)
+        if curve_node is not None:
+            col.label(text="Irregularity over length:", icon='FCURVE')
+            col.template_curve_mapping(curve_node, "mapping")
+            row = col.row(align=True)
+            row.operator("arantools.tree_rings_ensure_curve",
+                         text="Reset Curve", icon='LOOP_BACK').reset = True
+            row.label(text="Press Generate after editing.", icon='INFO')
+        else:
+            col.operator("arantools.tree_rings_ensure_curve",
+                         text="Add Irregularity Curve", icon='FCURVE').reset = False
+
+        col.prop(item, "lumpiness")
+        col.prop(item, "ring_drift")
+        col.prop(item, "seed")
+        if container.live_update and item.rings * item.points_per_ring > tree_rings.LIVE_MAX_POINTS:
+            col.label(text="Live paused (too heavy) — use Generate.", icon='ERROR')
+
+        ready = item.inner_object is not None and item.outer_object is not None
         gen = layout.row(align=True)
         gen.scale_y = 1.4
         gen.enabled = ready
@@ -1282,6 +1333,8 @@ class ARANTOOLS_PT_main(Panel):
         else:
             layout.label(text="Stays inside Outer even when rings overlap.",
                          icon='INFO')
+        layout.operator("arantools.tree_rings_generate_all",
+                        text="Generate All", icon='FORCE_VORTEX')
 
     def _draw_t_tree_inspect(self, layout, context):
         props = context.scene.arantools_tree_inspect
@@ -1769,6 +1822,7 @@ def register():
             ('NAMING',        "", "Naming",         'SORTALPHA',          5),
             ('ANIMATION',     "", "Animation",      'ANIM',               6),
             ('TREE',          "", "Tree Tools",     'OUTLINER_OB_CURVES', 7),
+            ('EXTRAS',        "", "Extras",         'PLUS',               8),
         ],
         default='RIGGING',
     )
