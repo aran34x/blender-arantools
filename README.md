@@ -1,8 +1,22 @@
 # Aran Tools
 
-A Blender addon collection for character rigging, weight painting, organization, animation, and bone naming workflows. All tools live in a single **Aran Tools** tab in the N-panel (View3D sidebar), organized into collapsible sections.
+A Blender addon collection for character rigging, weight painting, organization, animation, baking, tree authoring, and bone naming workflows. All tools live in a single **Aran Tools** tab in the N-panel (View3D sidebar), organized into collapsible icon tabs.
 
-**Minimum Blender version:** 3.0
+**Minimum Blender version:** 3.0 (Blender 4.2+ to install as an auto-updating extension)
+
+---
+
+## Installation
+
+**As an auto-updating extension (Blender 4.2+ — recommended):**
+**Edit ▸ Preferences ▸ Get Extensions ▸ ⌄ ▸ Add Remote Repository**, paste
+`https://aran34x.github.io/blender-arantools/index.json`, tick **Check for
+Updates on Startup**, then find "Aran Tools" in Get Extensions and **Install**.
+New versions are then offered automatically. Publishing details are in
+[DISTRIBUTING.md](DISTRIBUTING.md).
+
+**Manually:** drop the `arantools` folder into your Blender `scripts/addons/`
+and enable it in **Preferences ▸ Add-ons**.
 
 ---
 
@@ -27,11 +41,16 @@ A Blender addon collection for character rigging, weight painting, organization,
   - [Modifier Sync](#modifier-sync)
 - [Export](#export)
   - [ARP Batch Export](#arp-batch-export)
+- [Baking](#baking)
+  - [Normal Map Baker](#normal-map-baker)
+  - [Multires from High Poly](#multires-from-high-poly)
 - [Naming](#naming)
   - [Object Sequence Namer](#object-sequence-namer)
   - [Bone Renamer](#bone-renamer)
 - [Animation](#animation)
   - [Noise on Bones](#noise-on-bones)
+- [Tree Tools](#tree-tools)
+  - [Wood Ring Spiral](#wood-ring-spiral)
 
 ---
 
@@ -376,6 +395,49 @@ All actions present in the file are exported, each as a separate FBX named after
 
 ---
 
+## Baking
+
+### Normal Map Baker
+
+Scans for `<name>` / `<name>_High` mesh pairs and bakes a tangent-space normal map onto each low mesh, writing a PNG per texture to an output folder. The full scene state (render engine, bake settings, selection, mode, materials, transforms) is recorded up front and restored afterward.
+
+**Method:**
+
+| Method | What it does |
+| --- | --- |
+| **Selected → Active** | Casts rays from the low mesh outward to the high mesh (uses extrusion or an optional per-pair cage) |
+| **From Multires** | Bakes the low mesh's own Multires modifier detail onto its base level — no ray casting, so it avoids cage/extrusion artifacts |
+
+**Naming rule:** a low `Trunk` pairs with a high `Trunk_High` (suffix configurable), plus an optional cage `Trunk_Cage`. In **Selected** scope you can pick *either* the low or the high — the partner is resolved from the scene.
+
+**Grouping (how output textures are split):**
+
+| Mode | Result |
+| --- | --- |
+| **Per Object** | One texture per low mesh, named after the mesh |
+| **By Material** | One texture per material — every mesh sharing that material bakes into it (texture packing) |
+| **Manual Groups** | Hand-built groups; each group bakes into one shared texture |
+
+**Settings:** resolution (512–4096), samples, margin, cage extrusion, max ray distance, **Flip Green** (DirectX/Unreal style), **Overlap Pivots** (temporarily snaps the high mesh's origin onto the low's so a pair kept apart in the viewport still bakes), **Assign to Material** (wires the result into the Principled BSDF so it shows immediately in Material Preview — makes a single-user copy of a shared material first), and **Cycles Device** (GPU/CPU).
+
+After a bake, an **Open** button per texture shows it in the Image Editor, and a folder button opens the output folder.
+
+---
+
+### Multires from High Poly
+
+For each high/low pair, adds a **Multires** modifier to the low mesh, subdivides it, and shrinkwraps the subdivided detail onto the high mesh — baking the high-poly shape into the multires. Then bake with method **From Multires** for a clean, artifact-free normal map.
+
+**Settings:**
+
+| Property | Description |
+| --- | --- |
+| **Subdivisions** | Catmull-Clark levels to add before shrinkwrapping |
+| **Projection** | _Project_ (rays along normals, both directions), _Nearest Surface_, _Nearest Vertex_, or _Target Normal Project_ |
+| **Project Limit** | Max ray distance in Project mode (0 = unlimited) |
+
+---
+
 ## Naming
 
 ### Object Sequence Namer
@@ -498,3 +560,33 @@ Each click re-applies the modifier with a new random phase offset, so clicking a
 3. Click **Rotation**, **Location**, or **Both** to apply.
 
 **Requirements:** The armature must have an active Action with existing F-curves on the target bones. Noise is added on top of existing keyframe animation.
+
+---
+
+## Tree Tools
+
+The **Tree** tab holds geometry-node-based tree/foliage authoring tools — Branch Skeleton, Branch Tubes, Branch UV, Branch Blend, and the Tree Inspector — plus the wood-grain generator below.
+
+### Wood Ring Spiral
+
+Generates a randomizable growth-ring spiral between an **inner** and an **outer** shape (mesh edge-loops or curves), like tree growth rings or a wood-grain cross-section.
+
+The spiral is mathematically guaranteed **never to cross the outer boundary** — even when the rings overlap — because each point is a clamped blend between the inner and outer boundary measured along the same radial direction. Rings also morph in shape from the inner silhouette to the outer one as they expand.
+
+**How to use:**
+
+1. Assign an **Inner** and **Outer** shape (the eyedropper buttons grab the active object).
+2. Set **Rings**, **Points / Ring**, and the variation controls.
+3. Click **Generate**, or **Randomize** for a fresh seed/variant each click.
+
+**Variation:**
+
+| Property | Description |
+| --- | --- |
+| **Irregularity** | Random radial wobble as a fraction of one ring's spacing; `>1` lets rings overlap |
+| **Lumpiness** | Angular frequency of the wobble (few broad lobes → many small bumps) |
+| **Ring Drift** | How much the wobble changes ring-to-ring; `0` = perfectly nested |
+| **Seed** | Change for a different variant |
+| **Replace Previous** | Replace the last generated spiral instead of adding a new one |
+
+Output is a curve object (`WoodSpiral`) on the shapes' plane — ideal as a source to bake into a normal map.
