@@ -186,3 +186,7 @@ cython_debug/
 *.blend1
 /tree_uv_geonodes_dump.json
 /.claude/
+
+# Personal reference dumps
+/References/
+
