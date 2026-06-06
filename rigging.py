@@ -66,6 +66,143 @@ class ARANTOOLS_OT_select_bone_type(Operator):
 
 
 # ============================================================================
+# Snap Bones to Empties
+# ============================================================================
+
+class ARANTOOLS_PG_SnapBones(bpy.types.PropertyGroup):
+    snap_mode: bpy.props.EnumProperty(
+        name="Snap",
+        description="Which bone endpoints get snapped to the nearest visible empty",
+        items=[
+            ('AUTO', "Selected Joints",
+             "Snap only the endpoints that are actually selected "
+             "(head and/or tail), per bone"),
+            ('HEAD', "Head",
+             "Snap the head of every selected bone"),
+            ('TAIL', "Tail",
+             "Snap the tail of every selected bone"),
+            ('BOTH', "Head & Tail",
+             "Snap both the head and the tail of every selected bone"),
+            ('RIGID', "Whole Bone (Head)",
+             "Move the head to the nearest empty, then shift the tail by the "
+             "same offset — keeps the bone's length and direction (for bones "
+             "that are single objects)"),
+        ],
+        default='AUTO',
+    )
+    use_max_distance: bpy.props.BoolProperty(
+        name="Limit Distance",
+        description="Skip a joint when the nearest empty is farther than the "
+                    "max distance (in armature-object world units)",
+        default=False,
+    )
+    max_distance: bpy.props.FloatProperty(
+        name="Max Distance",
+        description="Maximum world-space distance to snap a joint to an empty",
+        default=1.0, min=0.0, subtype='DISTANCE',
+    )
+
+
+class ARANTOOLS_OT_SnapBonesToEmpties(Operator):
+    """In Armature Edit Mode, snap the selected bones' joints to the closest
+    visible empty in the scene"""
+    bl_idname = "arantools.snap_bones_to_empties"
+    bl_label = "Snap Bones to Empties"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        return (obj is not None and obj.type == 'ARMATURE'
+                and obj.mode == 'EDIT')
+
+    def execute(self, context):
+        props = context.scene.arantools_snap_bones
+        arm = context.object
+
+        # Visible empties only (respects viewport hide / view-layer exclusion).
+        empties = [o for o in context.view_layer.objects
+                   if o.type == 'EMPTY' and o.visible_get()]
+        if not empties:
+            self.report({'ERROR'}, "No visible empties in the scene.")
+            return {'CANCELLED'}
+
+        # Empty positions in the armature object's world space.
+        empty_world = [o.matrix_world.translation.copy() for o in empties]
+
+        arm_mw = arm.matrix_world
+        arm_inv = arm_mw.inverted_safe()
+        limit = props.max_distance if props.use_max_distance else None
+
+        def nearest(point_local):
+            """Return the local-space coord of the nearest empty, or None if
+            none is within the distance limit."""
+            point_world = arm_mw @ point_local
+            best_i, best_d = -1, float('inf')
+            for i, ew in enumerate(empty_world):
+                d = (ew - point_world).length
+                if d < best_d:
+                    best_d, best_i = d, i
+            if best_i < 0:
+                return None
+            if limit is not None and best_d > limit:
+                return None
+            return arm_inv @ empty_world[best_i]
+
+        mode = props.snap_mode
+        bones = [b for b in arm.data.edit_bones
+                 if (b.select_head or b.select_tail) and not b.hide]
+        if not bones:
+            self.report({'ERROR'}, "No selected bones in Edit Mode.")
+            return {'CANCELLED'}
+
+        moved = 0
+        skipped = 0
+        for b in bones:
+            # Rigid mode: snap the head, then translate the tail by the same
+            # offset so the bone keeps its length and orientation.
+            if mode == 'RIGID':
+                target = nearest(b.head)
+                if target is None:
+                    skipped += 1
+                    continue
+                offset = target - b.head
+                b.head = target
+                b.tail = b.tail + offset
+                moved += 1
+                continue
+
+            do_head = mode in {'HEAD', 'BOTH'} or (mode == 'AUTO' and b.select_head)
+            do_tail = mode in {'TAIL', 'BOTH'} or (mode == 'AUTO' and b.select_tail)
+
+            if do_head:
+                target = nearest(b.head)
+                if target is None:
+                    skipped += 1
+                else:
+                    b.head = target
+                    moved += 1
+            if do_tail:
+                target = nearest(b.tail)
+                if target is None:
+                    skipped += 1
+                else:
+                    b.tail = target
+                    moved += 1
+
+        if moved == 0:
+            self.report({'WARNING'},
+                        "No joints snapped (check the distance limit).")
+            return {'CANCELLED'}
+
+        msg = f"Snapped {moved} joint(s) to nearest empty."
+        if skipped:
+            msg += f" Skipped {skipped} (beyond max distance)."
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+# ============================================================================
 # Feather Rigger — helpers
 # ============================================================================
 
@@ -884,6 +1021,8 @@ class ARANTOOLS_OT_DirectArpBind(Operator):
 classes = [
     ARANTOOLS_OT_select_deform_bones,
     ARANTOOLS_OT_select_bone_type,
+    ARANTOOLS_PG_SnapBones,
+    ARANTOOLS_OT_SnapBonesToEmpties,
     ARANTOOLS_PG_FeatherRig,
     ARANTOOLS_OT_RigFeathers,
     ARANTOOLS_PG_AdvRigging,
@@ -899,9 +1038,11 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.arantools_feather_rig = bpy.props.PointerProperty(type=ARANTOOLS_PG_FeatherRig)
     bpy.types.Scene.arantools_adv_rigging = bpy.props.PointerProperty(type=ARANTOOLS_PG_AdvRigging)
+    bpy.types.Scene.arantools_snap_bones = bpy.props.PointerProperty(type=ARANTOOLS_PG_SnapBones)
 
 
 def unregister():
+    del bpy.types.Scene.arantools_snap_bones
     del bpy.types.Scene.arantools_adv_rigging
     del bpy.types.Scene.arantools_feather_rig
     for cls in reversed(classes):

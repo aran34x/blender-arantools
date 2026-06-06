@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 # Unique identifier (lowercase, no spaces). Do not change once shared —
 # the update system keys off it.
 id = "arantools"
-version = "0.2.4"
+version = "0.2.5"
 name = "Aran Tools"
 tagline = "Rigging, weight, naming, animation and tree authoring tools"
 maintainer = "Aran <aran34x@gmail.com>"

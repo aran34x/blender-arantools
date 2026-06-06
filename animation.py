@@ -1,4 +1,5 @@
 import bpy
+import blf
 import math
 import random
 import re
@@ -13,6 +14,9 @@ _NOISE_NAME = "Aran_Noise"
 
 _DURATION_PATTERN = re.compile(r'_(\d+)$')
 
+# Matches the bone name in an fcurve data_path like pose.bones["Spine"].location
+_BONE_NAME_PATTERN = re.compile(r'pose\.bones\["([^"]+)"\]')
+
 # Per-armature memory of the last seen active-action name so the background
 # timer only re-applies the timeline length when it actually changes.
 _animorg_last_action = {}
@@ -26,12 +30,76 @@ def _parse_duration(action_name):
     return int(m.group(1)) if m else None
 
 
+def _iter_action_fcurves(action):
+    """Yield every F-curve of an action, for both legacy and slotted
+    (Blender 4.4+ layered) actions.
+
+    Legacy actions expose `action.fcurves` directly. Layered actions removed
+    that attribute — their curves live in
+    action.layers[].strips[].channelbags[].fcurves."""
+    fcurves = getattr(action, 'fcurves', None)
+    if fcurves is not None:
+        try:
+            for fc in fcurves:
+                yield fc
+            return
+        except (TypeError, AttributeError):
+            pass
+    for layer in getattr(action, 'layers', []):
+        for strip in getattr(layer, 'strips', []):
+            for cbag in getattr(strip, 'channelbags', []):
+                for fc in getattr(cbag, 'fcurves', []):
+                    yield fc
+
+
 def _is_armature_action(action):
     """True if any fcurve targets a pose bone."""
-    for fc in action.fcurves:
+    for fc in _iter_action_fcurves(action):
         if fc.data_path.startswith('pose.bones['):
             return True
     return False
+
+
+def _armature_used_actions(arm):
+    """Set of actions the armature currently references (active + NLA strips)."""
+    used = set()
+    ad = arm.animation_data
+    if ad is not None:
+        if ad.action is not None:
+            used.add(ad.action)
+        for track in ad.nla_tracks:
+            for strip in track.strips:
+                if strip.action is not None:
+                    used.add(strip.action)
+    return used
+
+
+def _action_belongs_to_armature(action, bone_names, used):
+    """Heuristic ownership test used by the 'purge foreign actions' button.
+
+    An action is considered to belong to the selected armature when:
+      • it's currently used by the armature (active action or an NLA strip), OR
+      • it's an empty placeholder (no F-curves — e.g. just created here), OR
+      • every pose-bone it animates exists in this armature.
+
+    Actions that animate a bone NOT present in the armature, or that animate
+    no pose bones at all (object/mesh/etc. actions), are treated as foreign.
+    Two rigs that share identical bone names cannot be told apart.
+    """
+    if action in used:
+        return True
+    bone_refs = []
+    has_any_fcurve = False
+    for fc in _iter_action_fcurves(action):
+        has_any_fcurve = True
+        m = _BONE_NAME_PATTERN.match(fc.data_path)
+        if m:
+            bone_refs.append(m.group(1))
+    if not has_any_fcurve:
+        return True
+    if not bone_refs:
+        return False
+    return all(n in bone_names for n in bone_refs)
 
 
 def _apply_duration_to_timeline(scene, duration):
@@ -174,12 +242,17 @@ class ARANTOOLS_AnimOrg_Props(bpy.types.PropertyGroup):
         type=bpy.types.Object,
         poll=_poll_armature,
     )
-    new_action_name: bpy.props.StringProperty(
-        name="New Action",
-        description="Name with a trailing '_NNN' duration "
-                    "(e.g. 'TurnWithStick_400'). The number becomes the "
-                    "timeline end frame when the action is created or activated",
-        default="NewAction_100",
+    new_action_basename: bpy.props.StringProperty(
+        name="Name",
+        description="Base name for the new action. The duration is appended "
+                    "automatically as '_NNN' when you click Create & Activate",
+        default="NewAction",
+    )
+    new_action_duration: bpy.props.IntProperty(
+        name="Duration",
+        description="Length of the new action in frames. Appended to the name "
+                    "as '_NNN' and used as the timeline end frame",
+        default=100, min=1, max=100000,
     )
     auto_sync_timeline: bpy.props.BoolProperty(
         name="Auto-Sync Timeline",
@@ -194,6 +267,33 @@ class ARANTOOLS_AnimOrg_Props(bpy.types.PropertyGroup):
         default=True,
     )
     action_index: bpy.props.IntProperty(default=0)
+
+    # ── Viewport overlay: show the active action name big in the 3D view ──
+    show_visualization: bpy.props.BoolProperty(
+        name="Visualization",
+        description="Show the viewport-overlay visualization settings",
+        default=False,
+    )
+    show_action_overlay: bpy.props.BoolProperty(
+        name="Show Action in Viewport",
+        description="Draw the armature's active action name as a large overlay "
+                    "across the top of the 3D viewport",
+        default=True,
+        update=lambda self, ctx: _animorg_tag_redraw(ctx),
+    )
+    overlay_text_size: bpy.props.IntProperty(
+        name="Overlay Size",
+        description="Font size of the action-name overlay (pixels)",
+        default=36, min=10, max=200,
+        update=lambda self, ctx: _animorg_tag_redraw(ctx),
+    )
+    overlay_color: bpy.props.FloatVectorProperty(
+        name="Overlay Color",
+        description="Color of the action-name overlay text",
+        subtype='COLOR', size=4,
+        default=(1.0, 1.0, 1.0, 0.9), min=0.0, max=1.0,
+        update=lambda self, ctx: _animorg_tag_redraw(ctx),
+    )
 
 
 class ARANTOOLS_UL_AnimOrg_Actions(bpy.types.UIList):
@@ -234,8 +334,16 @@ set-active button, delete button."""
             flt_flags = [self.bitflag_filter_item] * len(actions)
 
         if props.only_armature_actions:
+            arm = props.armature
+            used = _armature_used_actions(arm) if arm is not None else set()
             for i, action in enumerate(actions):
-                if not _is_armature_action(action):
+                # Keep: real armature actions, this armature's active/NLA
+                # actions, and empty placeholders (freshly created, not yet
+                # keyed — these have no pose-bone F-curves to detect).
+                keep = (_is_armature_action(action)
+                        or action in used
+                        or not any(True for _ in _iter_action_fcurves(action)))
+                if not keep:
                     flt_flags[i] = 0
 
         flt_neworder = helper.sort_items_by_name(actions, "name")
@@ -261,10 +369,11 @@ set the scene end frame to N."""
             self.report({'ERROR'}, "Select an armature first.")
             return {'CANCELLED'}
 
-        name = props.new_action_name.strip()
-        if not name:
+        base = props.new_action_basename.strip().rstrip('_')
+        if not base:
             self.report({'ERROR'}, "Action name cannot be empty.")
             return {'CANCELLED'}
+        name = f"{base}_{props.new_action_duration}"
 
         action = bpy.data.actions.new(name)
         action.use_fake_user = True
@@ -335,6 +444,68 @@ class ARANTOOLS_OT_AnimOrg_Delete(Operator):
         return {'FINISHED'}
 
 
+class ARANTOOLS_OT_AnimOrg_PurgeForeign(Operator):
+    """Delete every action in this .blend file that does NOT belong to the
+selected armature. Keeps the armature's own actions (and empty placeholders);
+removes actions that animate bones absent from this armature or that don't
+animate any bone. This is permanent."""
+    bl_idname = "arantools.animorg_purge_foreign_actions"
+    bl_label = "Remove Foreign Actions"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.arantools_anim_org.armature is not None
+
+    def _foreign(self, context):
+        """Return (keep, remove) lists of actions for the selected armature."""
+        props = context.scene.arantools_anim_org
+        arm = props.armature
+        bone_names = {b.name for b in arm.data.bones}
+        used = _armature_used_actions(arm)
+        keep, remove = [], []
+        for action in bpy.data.actions:
+            if _action_belongs_to_armature(action, bone_names, used):
+                keep.append(action)
+            else:
+                remove.append(action)
+        return keep, remove
+
+    def invoke(self, context, event):
+        _, remove = self._foreign(context)
+        if not remove:
+            self.report({'INFO'}, "No foreign actions to remove.")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=320)
+
+    def draw(self, context):
+        layout = self.layout
+        arm = context.scene.arantools_anim_org.armature
+        _, remove = self._foreign(context)
+        layout.label(text=f"Delete {len(remove)} action(s) not from "
+                          f"'{arm.name}'?", icon='TRASH')
+        col = layout.column(align=True)
+        for action in remove[:12]:
+            col.label(text=action.name, icon='ACTION')
+        if len(remove) > 12:
+            col.label(text=f"… and {len(remove) - 12} more")
+        layout.label(text="This permanently removes them from the file.",
+                     icon='ERROR')
+
+    def execute(self, context):
+        _, remove = self._foreign(context)
+        if not remove:
+            self.report({'INFO'}, "No foreign actions to remove.")
+            return {'CANCELLED'}
+        names = [a.name for a in remove]
+        for action in names:
+            a = bpy.data.actions.get(action)
+            if a is not None:
+                bpy.data.actions.remove(a)
+        self.report({'INFO'}, f"Removed {len(names)} foreign action(s).")
+        return {'FINISHED'}
+
+
 class ARANTOOLS_OT_AnimOrg_SyncTimeline(Operator):
     """Re-parse the active action's '_NNN' suffix and apply it to the timeline.
 Useful after renaming an action manually."""
@@ -381,6 +552,109 @@ def _animorg_timer():
     except Exception as e:
         print(f"[AranTools animorg timer] {e}")
     return 0.4
+
+
+# ── Viewport overlay: draw the active action name big in the 3D view ───────
+# The handle is stashed in driver_namespace (not a module global) so the
+# Reload Addon button — which re-executes this module before unregister()
+# runs — can still find and remove a stale handler instead of leaking it.
+_OVERLAY_NS_KEY = "arantools_animorg_overlay_handle"
+
+
+def _animorg_tag_redraw(context):
+    """Force every 3D viewport to redraw (so the overlay updates instantly)."""
+    wm = getattr(context, 'window_manager', None) or bpy.context.window_manager
+    if wm is None:
+        return
+    for window in wm.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+def _animorg_draw_overlay():
+    """POST_PIXEL draw callback for the 3D viewport action-name overlay."""
+    try:
+        context = bpy.context
+        scene = context.scene
+        props = getattr(scene, 'arantools_anim_org', None)
+        if props is None or not props.show_action_overlay:
+            return
+
+        arm = props.armature
+        # Fall back to the active object if no armature is pinned in the panel.
+        if arm is None:
+            obj = context.active_object
+            if obj is not None and obj.animation_data is not None:
+                arm = obj
+        if (arm is None or arm.animation_data is None
+                or arm.animation_data.action is None):
+            return
+
+        action = arm.animation_data.action
+        name = action.name
+        sub = f"frame {scene.frame_current}  /  {scene.frame_end}"
+
+        region = context.region
+        if region is None:
+            return
+
+        font_id = 0
+        size = props.overlay_text_size
+
+        # blf.size dropped its DPI arg in Blender 4.0 — support both.
+        try:
+            blf.size(font_id, size)
+        except TypeError:
+            blf.size(font_id, size, 72)
+
+        blf.enable(font_id, blf.SHADOW)
+        blf.shadow(font_id, 5, 0.0, 0.0, 0.0, 1.0)
+        blf.shadow_offset(font_id, 2, -2)
+
+        # ── Title (action name), centered near the top ──
+        blf.color(font_id, *props.overlay_color)
+        tw, th = blf.dimensions(font_id, name)
+        x = max(10.0, (region.width - tw) / 2.0)
+        y = region.height - th - 40.0
+        blf.position(font_id, x, y, 0.0)
+        blf.draw(font_id, name)
+
+        # ── Subtitle (frame range), smaller, just below ──
+        sub_size = max(10, int(size * 0.45))
+        try:
+            blf.size(font_id, sub_size)
+        except TypeError:
+            blf.size(font_id, sub_size, 72)
+        r, g, b, a = props.overlay_color
+        blf.color(font_id, r, g, b, a * 0.8)
+        sw, sh = blf.dimensions(font_id, sub)
+        blf.position(font_id, max(10.0, (region.width - sw) / 2.0),
+                     y - sh - 6.0, 0.0)
+        blf.draw(font_id, sub)
+
+        blf.disable(font_id, blf.SHADOW)
+    except Exception as e:
+        print(f"[AranTools animorg overlay] {e}")
+
+
+def _animorg_overlay_unregister():
+    ns = bpy.app.driver_namespace
+    old = ns.get(_OVERLAY_NS_KEY)
+    if old is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(old, 'WINDOW')
+        except Exception:
+            pass
+        ns[_OVERLAY_NS_KEY] = None
+
+
+def _animorg_overlay_register():
+    # Always clear a possibly-stale handler first (survives module reload).
+    _animorg_overlay_unregister()
+    ns = bpy.app.driver_namespace
+    ns[_OVERLAY_NS_KEY] = bpy.types.SpaceView3D.draw_handler_add(
+        _animorg_draw_overlay, (), 'WINDOW', 'POST_PIXEL')
 
 
 # ============================================================================
@@ -881,6 +1155,7 @@ classes = [
     ARANTOOLS_OT_AnimOrg_NewAction,
     ARANTOOLS_OT_AnimOrg_SetActive,
     ARANTOOLS_OT_AnimOrg_Delete,
+    ARANTOOLS_OT_AnimOrg_PurgeForeign,
     ARANTOOLS_OT_AnimOrg_SyncTimeline,
     ARANTOOLS_CurveSmooth_Props,
     ARANTOOLS_OT_SpringSmoothCurves,
@@ -905,6 +1180,8 @@ def register():
 
     if not bpy.app.timers.is_registered(_animorg_timer):
         bpy.app.timers.register(_animorg_timer, persistent=True)
+
+    _animorg_overlay_register()
 
     # ── Global controls ───────────────────────────────────────────────────────
     bpy.types.Scene.arantools_rotation_strength = bpy.props.FloatProperty(
@@ -994,6 +1271,7 @@ def register():
 
 
 def unregister():
+    _animorg_overlay_unregister()
     if bpy.app.timers.is_registered(_animorg_timer):
         bpy.app.timers.unregister(_animorg_timer)
     del bpy.types.Scene.arantools_curve_smooth

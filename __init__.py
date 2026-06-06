@@ -74,6 +74,7 @@ _TOOL_REGISTRY = [
     # (id, name, description, tab, icon, draw_method, is_small)
     # is_small=True: always expanded, no collapse toggle (for single-button tools)
     ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform',  True),
+    ('snap_bones',     'Snap Bones to Empties',  'In Armature Edit Mode, snap the selected bones\' joints to the closest visible empty in the scene', 'RIGGING', 'EMPTY_ARROWS',   '_draw_t_snap_bones',     False),
     ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger', False),
     ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind',      False),
     ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
@@ -247,6 +248,31 @@ class ARANTOOLS_PT_main(Panel):
 
     def _draw_t_select_deform(self, layout, context):
         layout.operator("arantools.select_deform_bones", icon='BONE_DATA')
+
+    def _draw_t_snap_bones(self, layout, context):
+        props = context.scene.arantools_snap_bones
+        obj = context.active_object
+        col = layout.column(align=True)
+
+        in_edit = (obj is not None and obj.type == 'ARMATURE'
+                   and obj.mode == 'EDIT')
+        if not in_edit:
+            col.label(text="Enter Armature Edit Mode.", icon='INFO')
+
+        col.prop(props, "snap_mode", text="Snap")
+        col.separator()
+        col.prop(props, "use_max_distance")
+        sub = col.row(align=True)
+        sub.enabled = props.use_max_distance
+        sub.prop(props, "max_distance")
+        col.separator()
+
+        row = col.row()
+        row.scale_y = 1.4
+        row.enabled = in_edit
+        row.operator("arantools.snap_bones_to_empties",
+                     text="Snap to Nearest Empty", icon='SNAP_ON')
+        col.label(text="Snaps to the closest visible empty.", icon='EMPTY_ARROWS')
 
     def _draw_t_feather_rigger(self, layout, context):
         fr = context.scene.arantools_feather_rig
@@ -1537,6 +1563,25 @@ class ARANTOOLS_PT_main(Panel):
 
         col.separator()
 
+        # ── Visualization (collapsible) ──────────────────────────────────
+        ov = col.box()
+        header = ov.row(align=True)
+        header.prop(props, "show_visualization",
+                    icon='TRIA_DOWN' if props.show_visualization else 'TRIA_RIGHT',
+                    text="", emboss=False)
+        header.label(text="Visualization", icon='OVERLAY')
+        if props.show_visualization:
+            body = ov.column(align=True)
+            body.prop(props, "show_action_overlay",
+                      text="Show Action in Viewport",
+                      icon='HIDE_OFF' if props.show_action_overlay else 'HIDE_ON')
+            if props.show_action_overlay:
+                row = body.row(align=True)
+                row.prop(props, "overlay_text_size", text="Size")
+                row.prop(props, "overlay_color", text="")
+
+        col.separator()
+
         # ── Action list ──────────────────────────────────────────────────
         col.label(text="Actions:", icon='OUTLINER_DATA_GP_LAYER')
         col.template_list(
@@ -1548,17 +1593,22 @@ class ARANTOOLS_PT_main(Panel):
         filt = col.row(align=True)
         filt.prop(props, "only_armature_actions", toggle=True)
         filt.prop(props, "auto_sync_timeline", toggle=True)
+        col.operator("arantools.animorg_purge_foreign_actions",
+                     text="Remove Foreign Actions", icon='TRASH')
 
         col.separator()
 
         # ── New action ───────────────────────────────────────────────────
         col.label(text="Create New Action:", icon='ADD')
-        col.prop(props, "new_action_name", text="")
-        parsed_new = _anim._parse_duration(props.new_action_name)
-        if parsed_new is not None:
-            col.label(text=f"Timeline will be 1 → {parsed_new}", icon='TIME')
+        col.prop(props, "new_action_basename", text="Name")
+        col.prop(props, "new_action_duration", text="Duration")
+        base = props.new_action_basename.strip().rstrip('_')
+        if base:
+            col.label(text=f"→ {base}_{props.new_action_duration}   "
+                          f"(timeline 1 → {props.new_action_duration})",
+                      icon='TIME')
         else:
-            col.label(text="Append '_NNN' to set timeline (e.g. _400).", icon='INFO')
+            col.label(text="Enter a name.", icon='INFO')
         create_row = col.row()
         create_row.scale_y = 1.3
         create_row.operator("arantools.animorg_new_action",
