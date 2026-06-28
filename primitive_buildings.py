@@ -26,6 +26,16 @@ def update_modifier_source(self, context):
             item.use = True
 
 class ARANTOOLS_PG_PrimitiveBuildings(PropertyGroup):
+    # UI Toggles
+    ui_show_zenuv: bpy.props.BoolProperty(default=True)
+    ui_show_uv: bpy.props.BoolProperty(default=True)
+    ui_show_naming: bpy.props.BoolProperty(default=False)
+    ui_show_modifiers: bpy.props.BoolProperty(default=False)
+    ui_show_collection: bpy.props.BoolProperty(default=False)
+    ui_show_generate: bpy.props.BoolProperty(default=True)
+    ui_show_single_gen: bpy.props.BoolProperty(default=True)
+    ui_show_batch_gen: bpy.props.BoolProperty(default=False)
+
     modifier_source_object: bpy.props.PointerProperty(
         name="Modifier Source",
         type=bpy.types.Object,
@@ -123,6 +133,11 @@ class ARANTOOLS_PG_PrimitiveBuildings(PropertyGroup):
         default="",
         description="Text to replace with (leave empty to just remove)"
     )
+    target_collection: bpy.props.PointerProperty(
+        type=bpy.types.Collection,
+        name="Target Collection",
+        description="Collection to place the generated objects in (leave empty to keep in current collection)"
+    )
 
 class ARANTOOLS_OT_UpdateTrimMapping(Operator):
     bl_idname = "arantools.update_trim_mapping"
@@ -151,6 +166,10 @@ def _process_primitive_building(context, obj_list, pivot_matrix, props):
     bpy.ops.object.select_all(action='DESELECT')
     for obj in obj_list:
         obj.select_set(True)
+    context.view_layer.objects.active = obj_list[0]
+    
+    bpy.ops.object.duplicate()
+    obj_list = context.selected_objects
     context.view_layer.objects.active = obj_list[0]
     
     bpy.ops.object.make_single_user(type='SELECTED_OBJECTS', object=True, obdata=True)
@@ -345,41 +364,34 @@ def _process_primitive_building(context, obj_list, pivot_matrix, props):
                         l[uv_layer].uv.y = (l[uv_layer].uv.y - cy) * scale_norm + cy
                         
                 # Step 3: Rotate to Grain
-                target_edge = None
-                longest_len = -1.0
-                for f in island:
-                    for i, edge in enumerate(f.edges):
-                        length = edge.calc_length()
-                        if length > longest_len:
-                            longest_len = length
-                            target_edge = edge
-                            
-                if target_edge is not None:
-                    if len(target_edge.link_loops) > 0:
-                        l1 = target_edge.link_loops[0]
-                        l2 = l1.link_loop_next
-                        uv_dir = (l2[uv_layer].uv - l1[uv_layer].uv).normalized()
-                        angle = math.atan2(uv_dir.y, uv_dir.x)
-                        
-                        target_angle = 0.0 if props.grain_axis == 'U' else math.pi/2
-                        rot_angle = target_angle - angle
-                        
-                        # Nearest 90-degree snap
-                        rot_angle = round(rot_angle / (math.pi/2)) * (math.pi/2)
-                        
-                        cos_r = math.cos(rot_angle)
-                        sin_r = math.sin(rot_angle)
-                        
-                        uvs = [l[uv_layer].uv for f in island for l in f.loops]
-                        cx = sum(u.x for u in uvs) / len(uvs)
-                        cy = sum(u.y for u in uvs) / len(uvs)
-                        
-                        for f in island:
-                            for l in f.loops:
-                                u_x = l[uv_layer].uv.x - cx
-                                u_y = l[uv_layer].uv.y - cy
-                                l[uv_layer].uv.x = u_x * cos_r - u_y * sin_r + cx
-                                l[uv_layer].uv.y = u_x * sin_r + u_y * cos_r + cy
+                # Measure width and height of the island in UV space to find its actual dominant axis
+                uvs = [l[uv_layer].uv for f in island for l in f.loops]
+                i_min_x = min(u.x for u in uvs)
+                i_max_x = max(u.x for u in uvs)
+                i_min_y = min(u.y for u in uvs)
+                i_max_y = max(u.y for u in uvs)
+                w_i = i_max_x - i_min_x
+                h_i = i_max_y - i_min_y
+                
+                # If the island is taller than it is wide, its dominant axis is V (Vertical)
+                # If the island is wider than it is tall, its dominant axis is U (Horizontal)
+                is_vertical = h_i > w_i
+                wants_vertical = (props.grain_axis == 'V')
+                
+                # If it doesn't match the requested grain axis, rotate by 90 degrees
+                if is_vertical != wants_vertical:
+                    cos_r = 0.0
+                    sin_r = 1.0 # 90 degree rotation
+                    
+                    cx = sum(u.x for u in uvs) / len(uvs)
+                    cy = sum(u.y for u in uvs) / len(uvs)
+                    
+                    for f in island:
+                        for l in f.loops:
+                            u_x = l[uv_layer].uv.x - cx
+                            u_y = l[uv_layer].uv.y - cy
+                            l[uv_layer].uv.x = u_x * cos_r - u_y * sin_r + cx
+                            l[uv_layer].uv.y = u_x * sin_r + u_y * cos_r + cy
 
                 # Measure width and height after rotation/scaling
                 uvs = [l[uv_layer].uv for f in island for l in f.loops]
@@ -513,6 +525,14 @@ def _copy_modifiers(context, props, target_obj):
             target_obj.select_set(True)
             context.view_layer.objects.active = target_obj
 
+def _move_to_collection(obj, target_collection):
+    if not target_collection: return
+    if obj.name not in target_collection.objects:
+        target_collection.objects.link(obj)
+    for col in obj.users_collection:
+        if col != target_collection:
+            col.objects.unlink(obj)
+
 def _run_batch_logic(context, props, base_objects, operator):
     if not base_objects:
         operator.report({'WARNING'}, "No base objects found")
@@ -568,6 +588,7 @@ def _run_batch_logic(context, props, base_objects, operator):
                 new_obj.name = f"{props.batch_name_add_prefix}{base_name}{props.batch_name_add_suffix}"
                 
             _copy_modifiers(context, props, new_obj)
+            _move_to_collection(new_obj, props.target_collection)
             new_obj.location.z = props.batch_target_z
             generated_count += 1
             
@@ -588,11 +609,16 @@ class ARANTOOLS_OT_PrimitiveBuildings(Operator):
             self.report({'WARNING'}, "No suitable objects selected")
             return {'CANCELLED'}
             
-        pivot_matrix = context.active_object.matrix_world.copy() if context.active_object else None
+        # Get active object for pivot matrix
+        active_obj = context.active_object
+        if not active_obj: active_obj = selected_objs[0]
+        pivot_matrix = active_obj.matrix_world.copy()
+        
         new_obj = _process_primitive_building(context, selected_objs, pivot_matrix, props)
         
         if new_obj:
             _copy_modifiers(context, props, new_obj)
+            _move_to_collection(new_obj, props.target_collection)
             bpy.ops.object.select_all(action='DESELECT')
             new_obj.select_set(True)
             context.view_layer.objects.active = new_obj
@@ -643,6 +669,33 @@ class ARANTOOLS_OT_RefreshPrimitiveBuilding(Operator):
             
         return _run_batch_logic(context, props, [source_obj], self)
 
+
+class ARANTOOLS_OT_PrimitiveBuildingsHelp(Operator):
+    bl_idname = "arantools.primitive_buildings_help"
+    bl_label = "How to Use Primitive Buildings"
+    bl_description = "Show instructions for 3D Artists"
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=450)
+        
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Workflow for 3D Artists:", icon='INFO')
+        layout.label(text="1. Model your primitive pieces using a base object with children.")
+        layout.label(text="2. Assign materials to the faces (ZenUV will match these).")
+        layout.label(text="3. Select the base object and hit 'Generate from Children'.")
+        layout.label(text="   (Or use Batch Generate for multiple bases).")
+        layout.separator()
+        layout.label(text="What this tool does automatically:", icon='MOD_BUILD')
+        layout.label(text="- Duplicates and joins all pieces into a single mesh.")
+        layout.label(text="- Automatically Smart UV Projects everything.")
+        layout.label(text="- Rotates the UV islands to align the wood grain.")
+        layout.label(text="- Mathematically perfectly fits them into your ZenUV trims.")
+        layout.label(text="- If you edit the source objects, just click Refresh Generation!")
+        
+    def execute(self, context):
+        return {'FINISHED'}
+
 classes = [
     ARANTOOLS_PG_ModifierItem,
     ARANTOOLS_PG_TrimMapping,
@@ -652,6 +705,7 @@ classes = [
     ARANTOOLS_OT_PrimitiveBuildingsChildren,
     ARANTOOLS_OT_BatchPrimitiveBuildings,
     ARANTOOLS_OT_RefreshPrimitiveBuilding,
+    ARANTOOLS_OT_PrimitiveBuildingsHelp,
 ]
 
 def register():
