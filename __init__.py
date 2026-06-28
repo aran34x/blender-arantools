@@ -26,6 +26,8 @@ from . import tree_uv_geonode
 from . import tree_tubes_geonode
 from . import tree_blend_geonode
 from . import tree_rings
+from . import tree_retopo
+from . import primitive_buildings
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -84,6 +86,7 @@ _TOOL_REGISTRY = [
     ('unify_island',   'Unify Island Weights',   'Blend and unify vertex weights uniformly across UV islands',                      'WEIGHT',       'SNAP_FACE',          '_draw_t_unify_island',   False),
     ('island_copy',    'Island Weight Copy',     'Copy weights from one mesh island to others using a base vertex reference',       'WEIGHT',       'COPY_ID',            '_draw_t_island_copy',    False),
     ('contact_flood',  'Contact Weight Flooder', 'Flood vertex weights based on proximity or UV contact with a source object',      'WEIGHT',       'PARTICLE_POINT',     '_draw_t_contact_flood',  False),
+    ('island_rigid',   'Rigid Bind by Island',   'For each mesh island, assign weight 1.0 to the closest bone — a rigid bind where each island follows one bone', 'WEIGHT', 'GROUP_BONE',     '_draw_t_island_rigid',   False),
     ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig',      False),
     ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
     ('mod_sync',       'Modifier Sync',          'Save a modifier stack from one object and copy or sync it to other objects',       'ORGANIZATION', 'MODIFIER',           '_draw_t_mod_sync',       False),
@@ -102,6 +105,8 @@ _TOOL_REGISTRY = [
     ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
     ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'EXTRAS', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
+    ('primitive_buildings', 'Primitive Buildings Tool', 'Takes selected meshes, duplicates, joins, Smart UV projects, rotates islands to align wood grain to longest 3D bounding box edge, and separates UVs into quadrants by material', 'EXTRAS', 'MESH_CUBE', '_draw_t_primitive_buildings', False),
+    ('tree_retopo',    'Branch Retopo (Sweep)',  'Auto-retopologise an organic branch/tree sculpt into clean quad cylinders with cylinder UVs. Detect an editable centerline skeleton (finds the cylinders / branch splits), then generate surface-fitted rings with smooth junctions. SpeedTree-style clean cage; fine bark detail goes to the Normal Map Baker', 'EXTRAS', 'MESH_CYLINDER', '_draw_t_tree_retopo', False),
 ]
 
 # Only collapsible (non-small) tools need a BoolProperty
@@ -373,6 +378,25 @@ class ARANTOOLS_PT_main(Panel):
             row.prop(props, "uv_axis", expand=True)
             row.prop(props, "uv_direction", expand=True)
         col.operator("arantools.contact_flood", icon='DRIVER_DISTANCE')
+
+    def _draw_t_island_rigid(self, layout, context):
+        props = context.scene.arantools_island_rigid
+        col = layout.column(align=True)
+        col.prop(props, "armature")
+        if props.armature is None:
+            col.label(text="Empty = auto-detect from the active mesh.",
+                      icon='INFO')
+        col.separator()
+        col.prop(props, "measure", text="")
+        col.prop(props, "deform_only")
+        col.prop(props, "only_selected")
+        col.prop(props, "bind_to_armature")
+        col.separator()
+        row = col.row()
+        row.scale_y = 1.3
+        row.operator("arantools.island_rigid_bind", icon='GROUP_BONE')
+        col.label(text="Each island → weight 1.0 to its nearest bone.",
+                  icon='BONE_DATA')
 
     def _draw_t_batch_rig(self, layout, context):
         props = context.scene.arantools_rt_props
@@ -671,6 +695,27 @@ class ARANTOOLS_PT_main(Panel):
         from . import baking as _baking
         props = context.scene.arantools_normal_bake
         multires = props.bake_mode == 'MULTIRES'
+
+        # ── Bake Preview mode takes over the panel ────────────────────────
+        if props.bake_preview_active:
+            box = layout.box()
+            box.label(text="BAKE PREVIEW", icon='HIDE_OFF')
+            box.label(text="Matched islands share one colour.", icon='COLOR')
+            row = box.row(align=True)
+            row.prop(props, "bake_preview_show", expand=True)
+            box.prop(props, "bake_preview_exploded", toggle=True,
+                     icon='MOD_EXPLODE')
+            box.separator()
+            run = box.row(align=True)
+            run.scale_y = 1.4
+            run.operator("arantools.bake_preview_bake",
+                         text="Bake Now", icon='RENDER_STILL')
+            run.operator("arantools.bake_preview_exit",
+                         text="Exit", icon='X')
+            box.label(text="Check each high feather got its own colour.",
+                      icon='INFO')
+            return
+
         col = layout.column(align=True)
 
         # ── Method ────────────────────────────────────────────────────────
@@ -716,6 +761,21 @@ class ARANTOOLS_PT_main(Panel):
         col.prop(props, "flip_green")
         if not multires:
             col.prop(props, "align_pivots")
+            col.prop(props, "isolate_islands")
+            if props.isolate_islands:
+                box = col.box()
+                box.prop(props, "isolate_match", text="Match")
+                if props.isolate_match == 'NEAREST':
+                    box.prop(props, "isolate_samples", text="Samples")
+                box.prop(props, "explode_margin", text="Grid Margin")
+                box.label(text="Islands laid on a 3D grid, then ONE bake.",
+                          icon='MOD_EXPLODE')
+                box.label(text="Needs EQUAL island counts (low = high).",
+                          icon='INFO')
+                pv = box.row()
+                pv.scale_y = 1.3
+                pv.operator("arantools.bake_preview_enter",
+                            text="Enter Bake Preview", icon='HIDE_OFF')
         col.prop(props, "assign_to_material")
         col.separator()
         col.prop(props, "grouping", text="Group")
@@ -1266,6 +1326,15 @@ class ARANTOOLS_PT_main(Panel):
         linfo.label(text="Set 'Trunk' object input on the modifier!",
                     icon='INFO')
 
+    def _draw_t_primitive_buildings(self, layout, context):
+        props = context.scene.arantools_primitive_buildings
+        layout.prop(props, "target_material")
+        layout.prop(props, "grain_axis")
+        layout.prop(props, "uv_shift")
+        
+        layout.separator()
+        layout.operator("arantools.primitive_buildings_tool", text="Generate Primitive Building", icon='MOD_BUILD')
+
     def _draw_t_tree_rings(self, layout, context):
         container = context.scene.arantools_tree_rings
 
@@ -1361,6 +1430,84 @@ class ARANTOOLS_PT_main(Panel):
                          icon='INFO')
         layout.operator("arantools.tree_rings_generate_all",
                         text="Generate All", icon='FORCE_VORTEX')
+
+    def _draw_t_tree_retopo(self, layout, context):
+        from . import tree_retopo as _rt
+        props = context.scene.arantools_tree_retopo
+        obj = context.active_object
+
+        # ── Source sculpt ──────────────────────────────────────────────────
+        col = layout.column(align=True)
+        col.prop(props, "source", text="Sculpt")
+        if props.source is None:
+            col.label(text="Set the Source sculpt (surface to wrap).",
+                      icon='INFO')
+
+        # ── Manual skeleton (recommended) ──────────────────────────────────
+        mbox = layout.box()
+        mbox.label(text="Manual Skeleton", icon='OUTLINER_OB_CURVES')
+        mbox.operator("arantools.tree_retopo_new_skeleton",
+                      text="New Manual Skeleton", icon='ADD')
+        mbox.label(text="Edit Mode → extrude verts along each branch.",
+                   icon='EDITMODE_HLT')
+        rrow = mbox.row(align=True)
+        rrow.operator("arantools.tree_retopo_mark_roots",
+                      text="Mark Roots", icon='RADIOBUT_ON')
+        rrow.operator("arantools.tree_retopo_select_roots",
+                      text="Select", icon='RESTRICT_SELECT_OFF')
+        rrow.operator("arantools.tree_retopo_clear_roots",
+                      text="", icon='X')
+        # Root count on the active skeleton
+        if obj is not None and obj.type == 'MESH':
+            nroots = len(_rt._get_roots(obj.data))
+            if nroots:
+                mbox.label(text=f"{nroots} root(s) marked on '{obj.name}'.",
+                           icon='CHECKMARK')
+            else:
+                mbox.label(text="Select root verts, then Mark Roots.",
+                           icon='INFO')
+        mbox.label(text="Several roots OK — one per branch system.")
+
+        # ── Generate ───────────────────────────────────────────────────────
+        layout.separator()
+        g = layout.column(align=True)
+        g.label(text="Generate Retopo", icon='MESH_CYLINDER')
+        g.prop(props, "radial_segments", text="Sides")
+        g.prop(props, "uv_v_mode", text="UV V")
+        g.prop(props, "ray_clamp")
+        g.prop(props, "surface_offset")
+        g.prop(props, "cap_tips")
+        g.prop(props, "junction_merge", text="Junction Weld")
+        g.prop(props, "add_subsurf")
+        if props.add_subsurf:
+            g.prop(props, "subsurf_levels", text="Subsurf Levels")
+
+        gen = layout.row()
+        gen.scale_y = 1.4
+        gen.operator("arantools.tree_retopo_generate",
+                     text="Generate from Active Skeleton", icon='MESH_CYLINDER')
+        layout.label(text="Active = skeleton, Source = sculpt to wrap.",
+                     icon='INFO')
+
+        # ── Auto detect (experimental, collapsible) ─────────────────────────
+        adv = layout.box()
+        header = adv.row(align=True)
+        header.prop(props, "show_advanced",
+                    icon='TRIA_DOWN' if props.show_advanced else 'TRIA_RIGHT',
+                    text="", emboss=False)
+        header.label(text="Auto Detect (experimental)", icon='SHADERFX')
+        if props.show_advanced:
+            c = adv.column(align=True)
+            c.label(text="Needs a watertight solid sculpt.", icon='INFO')
+            c.prop(props, "root_mode", text="Root")
+            c.prop(props, "process_scope", text="Parts")
+            c.prop(props, "skeleton_detail")
+            c.prop(props, "contract_iterations")
+            c.prop(props, "contract_strength", slider=True)
+            c.operator("arantools.tree_retopo_detect",
+                       text="Detect Skeleton", icon='OUTLINER_OB_CURVES')
+            c.operator("arantools.tree_retopo_full",
+                       text="Full Auto Retopo", icon='SHADERFX')
 
     def _draw_t_tree_inspect(self, layout, context):
         props = context.scene.arantools_tree_inspect
@@ -1601,11 +1748,14 @@ class ARANTOOLS_PT_main(Panel):
         # ── New action ───────────────────────────────────────────────────
         col.label(text="Create New Action:", icon='ADD')
         col.prop(props, "new_action_basename", text="Name")
-        col.prop(props, "new_action_duration", text="Duration")
+        row = col.row(align=True)
+        row.prop(props, "start_frame", text="Start")
+        row.prop(props, "new_action_duration", text="End")
         base = props.new_action_basename.strip().rstrip('_')
         if base:
             col.label(text=f"→ {base}_{props.new_action_duration}   "
-                          f"(timeline 1 → {props.new_action_duration})",
+                          f"(timeline {props.start_frame} → "
+                          f"{props.new_action_duration})",
                       icon='TIME')
         else:
             col.label(text="Enter a name.", icon='INFO')
@@ -1861,6 +2011,8 @@ def register():
     tree_tubes_geonode.register()
     tree_blend_geonode.register()
     tree_rings.register()
+    primitive_buildings.register()
+    tree_retopo.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -1907,6 +2059,8 @@ def unregister():
         delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    tree_retopo.unregister()
+    primitive_buildings.unregister()
     tree_rings.unregister()
     tree_blend_geonode.unregister()
     tree_tubes_geonode.unregister()

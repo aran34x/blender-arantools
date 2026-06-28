@@ -105,8 +105,10 @@ def _action_belongs_to_armature(action, bone_names, used):
 def _apply_duration_to_timeline(scene, duration):
     if duration is None or duration < 1:
         return
-    scene.frame_start = 1
-    scene.frame_end = duration
+    props = getattr(scene, 'arantools_anim_org', None)
+    start = props.start_frame if props is not None else 0
+    scene.frame_start = start
+    scene.frame_end = max(start, duration)
 
 
 def _assign_action(arm, action):
@@ -253,6 +255,13 @@ class ARANTOOLS_AnimOrg_Props(bpy.types.PropertyGroup):
         description="Length of the new action in frames. Appended to the name "
                     "as '_NNN' and used as the timeline end frame",
         default=100, min=1, max=100000,
+    )
+    start_frame: bpy.props.IntProperty(
+        name="Start Frame",
+        description="Frame the timeline starts on when a duration is applied "
+                    "(on create, activate, or auto-sync). The '_NNN' suffix is "
+                    "the end frame",
+        default=0, min=0, max=100000,
     )
     auto_sync_timeline: bpy.props.BoolProperty(
         name="Auto-Sync Timeline",
@@ -527,7 +536,8 @@ Useful after renaming an action manually."""
             return {'CANCELLED'}
         _apply_duration_to_timeline(context.scene, duration)
         _animorg_last_action[f"{context.scene.name}|{arm.name}"] = action.name
-        self.report({'INFO'}, f"Timeline set to 1–{duration}.")
+        self.report({'INFO'},
+                    f"Timeline set to {props.start_frame}–{duration}.")
         return {'FINISHED'}
 
 

@@ -1,6 +1,41 @@
 import bpy
 from collections import defaultdict
 from bpy.types import Operator
+from mathutils import Vector
+
+
+def _wt_get_islands(me):
+    """Connected-component vertex islands of a mesh (by edges)."""
+    adjacency = [[] for _ in me.vertices]
+    for e in me.edges:
+        v1, v2 = e.vertices
+        adjacency[v1].append(v2)
+        adjacency[v2].append(v1)
+    visited = set()
+    islands = []
+    for v_idx in range(len(me.vertices)):
+        if v_idx not in visited:
+            stack, island = [v_idx], []
+            visited.add(v_idx)
+            while stack:
+                cur = stack.pop()
+                island.append(cur)
+                for neigh in adjacency[cur]:
+                    if neigh not in visited:
+                        visited.add(neigh)
+                        stack.append(neigh)
+            islands.append(island)
+    return islands
+
+
+def _wt_segment_distance(pt, v1, v2):
+    """Distance from point `pt` to the nearest point on segment v1–v2."""
+    seg = v2 - v1
+    seg_len_sq = seg.length_squared
+    if seg_len_sq < 1e-12:
+        return (pt - v1).length
+    t = max(0.0, min(1.0, (pt - v1).dot(seg) / seg_len_sq))
+    return (pt - (v1 + seg * t)).length
 
 
 # ============================================================================
@@ -552,6 +587,182 @@ class ARANTOOLS_OT_ContactFlood(Operator):
 
 
 # ============================================================================
+# Rigid Bind by Island — weight 1.0 to the nearest bone per island
+# ============================================================================
+
+class ARANTOOLS_PG_IslandRigid(bpy.types.PropertyGroup):
+    armature: bpy.props.PointerProperty(
+        name="Armature",
+        type=bpy.types.Object,
+        description="Armature to bind to. Leave empty to auto-detect from the "
+                    "active mesh's Armature modifier or parent",
+        poll=lambda self, obj: obj.type == 'ARMATURE',
+    )
+    deform_only: bpy.props.BoolProperty(
+        name="Deform Bones Only",
+        description="Only consider bones with the Deform flag enabled",
+        default=True,
+    )
+    measure: bpy.props.EnumProperty(
+        name="Measure",
+        description="How each island's distance to a bone is measured",
+        items=[
+            ('CLOSEST', "Closest Vertex",
+             "Nearest distance from any vertex in the island to the bone — "
+             "most accurate"),
+            ('CENTROID', "Island Centroid",
+             "Distance from the island's average position to the bone — "
+             "faster on dense meshes"),
+        ],
+        default='CLOSEST',
+    )
+    only_selected: bpy.props.BoolProperty(
+        name="Only Selected Vertices",
+        description="Restrict to islands containing vertices selected in Edit "
+                    "Mode (only those vertices are reweighted)",
+        default=False,
+    )
+    bind_to_armature: bpy.props.BoolProperty(
+        name="Add Armature Modifier",
+        description="Parent the mesh to the armature and add an Armature "
+                    "modifier if one isn't present",
+        default=False,
+    )
+
+
+class ARANTOOLS_OT_IslandRigidBind(Operator):
+    """For each mesh island, find the closest bone and assign every vertex in
+that island a weight of 1.0 to that bone (clearing other groups)"""
+    bl_idname = "arantools.island_rigid_bind"
+    bl_label = "Bind Islands to Nearest Bone"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def _find_armature(self, obj, props):
+        if props.armature is not None:
+            return props.armature
+        for mod in obj.modifiers:
+            if mod.type == 'ARMATURE' and mod.object:
+                return mod.object
+        if obj.parent and obj.parent.type == 'ARMATURE':
+            return obj.parent
+        return None
+
+    def execute(self, context):
+        props = context.scene.arantools_island_rigid
+        obj = context.active_object
+
+        arm = self._find_armature(obj, props)
+        if arm is None:
+            self.report({'ERROR'}, "No armature found. Pick one in the panel "
+                                   "or add an Armature modifier.")
+            return {'CANCELLED'}
+
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        me = obj.data
+
+        # World-space bone segments (rest pose).
+        arm_mw = arm.matrix_world
+        segments = []  # (bone_name, head_world, tail_world)
+        for b in arm.data.bones:
+            if props.deform_only and not b.use_deform:
+                continue
+            segments.append((b.name,
+                             arm_mw @ b.head_local,
+                             arm_mw @ b.tail_local))
+        if not segments:
+            self.report({'ERROR'}, "Armature has no "
+                        + ("deform " if props.deform_only else "")
+                        + "bones to bind to.")
+            return {'CANCELLED'}
+
+        islands = _wt_get_islands(me)
+        if not islands:
+            self.report({'WARNING'}, "No vertex islands found.")
+            return {'CANCELLED'}
+
+        selected_verts = None
+        if props.only_selected:
+            selected_verts = {v.index for v in me.vertices if v.select}
+            if not selected_verts:
+                self.report({'WARNING'}, "No vertices selected.")
+                return {'CANCELLED'}
+
+        mesh_mw = obj.matrix_world
+        world_co = [mesh_mw @ v.co for v in me.vertices]
+
+        processed = 0
+        for island in islands:
+            target_verts = (island if selected_verts is None
+                            else [v for v in island if v in selected_verts])
+            if not target_verts:
+                continue
+
+            # Find the nearest bone for this island.
+            if props.measure == 'CENTROID':
+                rep = Vector((0.0, 0.0, 0.0))
+                for v in island:
+                    rep += world_co[v]
+                rep /= len(island)
+                best_name, best_d = None, float('inf')
+                for name, head, tail in segments:
+                    d = _wt_segment_distance(rep, head, tail)
+                    if d < best_d:
+                        best_d, best_name = d, name
+            else:  # CLOSEST
+                best_name, best_d = None, float('inf')
+                for name, head, tail in segments:
+                    for v in island:
+                        d = _wt_segment_distance(world_co[v], head, tail)
+                        if d < best_d:
+                            best_d, best_name = d, name
+                        if best_d == 0.0:
+                            break
+
+            if best_name is None:
+                continue
+
+            vg = obj.vertex_groups.get(best_name) or \
+                obj.vertex_groups.new(name=best_name)
+            winner_idx = vg.index
+
+            # Clear every other group on these verts, then set weight 1.0.
+            groups_to_clear = set()
+            for v in target_verts:
+                for g in me.vertices[v].groups:
+                    groups_to_clear.add(g.group)
+            groups_to_clear.discard(winner_idx)
+            for gi in groups_to_clear:
+                obj.vertex_groups[gi].remove(target_verts)
+            vg.add(target_verts, 1.0, 'REPLACE')
+            processed += 1
+
+        # Optional: ensure the mesh is actually driven by the armature.
+        if props.bind_to_armature:
+            if obj.parent != arm:
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                arm.select_set(True)
+                context.view_layer.objects.active = arm
+                bpy.ops.object.parent_set(type='ARMATURE', keep_transform=True)
+                context.view_layer.objects.active = obj
+            if not any(m.type == 'ARMATURE' and m.object == arm
+                       for m in obj.modifiers):
+                m = obj.modifiers.new(name="Armature", type='ARMATURE')
+                m.object = arm
+
+        self.report({'INFO'},
+                    f"Bound {processed} island(s) to nearest bone of "
+                    f"'{arm.name}'.")
+        return {'FINISHED'}
+
+
+# ============================================================================
 # Registration
 # ============================================================================
 
@@ -565,6 +776,8 @@ classes = [
     ARANTOOLS_OT_IslandWeightCopy,
     ARANTOOLS_PG_ContactFlood,
     ARANTOOLS_OT_ContactFlood,
+    ARANTOOLS_PG_IslandRigid,
+    ARANTOOLS_OT_IslandRigidBind,
 ]
 
 
@@ -575,9 +788,11 @@ def register():
     bpy.types.Scene.arantools_unify_weights = bpy.props.PointerProperty(type=ARANTOOLS_PG_UnifyWeights)
     bpy.types.Scene.arantools_island_copy = bpy.props.PointerProperty(type=ARANTOOLS_PG_IslandCopy)
     bpy.types.Scene.arantools_contact_flood = bpy.props.PointerProperty(type=ARANTOOLS_PG_ContactFlood)
+    bpy.types.Scene.arantools_island_rigid = bpy.props.PointerProperty(type=ARANTOOLS_PG_IslandRigid)
 
 
 def unregister():
+    del bpy.types.Scene.arantools_island_rigid
     del bpy.types.Scene.arantools_contact_flood
     del bpy.types.Scene.arantools_island_copy
     del bpy.types.Scene.arantools_unify_weights
