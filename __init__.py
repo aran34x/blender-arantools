@@ -1328,12 +1328,94 @@ class ARANTOOLS_PT_main(Panel):
 
     def _draw_t_primitive_buildings(self, layout, context):
         props = context.scene.arantools_primitive_buildings
+        
+        is_generated = False
+        source_name = ""
+        if context.active_object and "arantools_batch_source" in context.active_object:
+            is_generated = True
+            source_name = context.active_object["arantools_batch_source"]
+            
         layout.prop(props, "target_material")
+        layout.label(text="Generation Settings:")
         layout.prop(props, "grain_axis")
-        layout.prop(props, "uv_shift")
         
         layout.separator()
-        layout.operator("arantools.primitive_buildings_tool", text="Generate Primitive Building", icon='MOD_BUILD')
+        layout.prop(props, "use_zenuv")
+        if props.use_zenuv:
+            box = layout.box()
+            box.operator("arantools.update_trim_mapping", icon='FILE_REFRESH')
+            if not props.trim_mappings:
+                box.label(text="Click Refresh to load trims", icon='INFO')
+            for mapping in props.trim_mappings:
+                row = box.row()
+                row.label(text=mapping.trim_name)
+                row.prop(mapping, "material", text="")
+        else:
+            layout.prop(props, "uv_shift")
+        
+        layout.separator()
+        layout.label(text="Generation Settings:")
+        layout.prop(props, "batch_target_z")
+        
+        layout.label(text="UV Settings:")
+        layout.prop(props, "uv_normalize_scale")
+        row = layout.row()
+        row.enabled = props.uv_normalize_scale
+        row.prop(props, "uv_scale_multiplier")
+        layout.prop(props, "uv_border_margin")
+        layout.prop(props, "uv_randomize")
+        if props.uv_randomize:
+            layout.prop(props, "uv_randomize_amount")
+        layout.prop(props, "uv_mark_seams")
+        
+        layout.separator()
+        layout.label(text="Naming:")
+        row = layout.row(align=True)
+        row.prop(props, "batch_name_replace_old")
+        row.prop(props, "batch_name_replace_new")
+        
+        row2 = layout.row(align=True)
+        row2.prop(props, "batch_name_add_prefix")
+        row2.prop(props, "batch_name_add_suffix")
+        
+        layout.separator()
+        layout.label(text="Copy Modifiers:")
+        layout.prop(props, "modifier_source_object")
+        if props.modifier_source_object:
+            box = layout.box()
+            if len(props.modifier_items) == 0:
+                box.label(text="No modifiers found")
+            for item in props.modifier_items:
+                box.prop(item, "use", text=item.name)
+        
+        layout.separator()
+        if is_generated:
+            box = layout.box()
+            row = box.row()
+            row.label(text=f"Source: {source_name}", icon='LINKED')
+            op = row.operator("arantools.refresh_primitive_building", text="Refresh Generation", icon='FILE_REFRESH')
+            op.source_name = source_name
+        else:
+            layout.operator("arantools.primitive_buildings_tool", text="Generate from Selection", icon='MOD_BUILD')
+            layout.operator("arantools.primitive_buildings_children", text="Generate from Children", icon='OUTLINER_OB_EMPTY')
+            
+            layout.separator()
+            layout.label(text="Batch Processing:")
+            layout.prop(props, "batch_name_prefix")
+            
+            prefix = props.batch_name_prefix
+            if prefix:
+                match_count = sum(1 for o in context.scene.objects if prefix in o.name)
+                layout.label(text=f"Will process {match_count} base objects", icon='INFO')
+                if match_count > 0:
+                    example_obj = next(o for o in context.scene.objects if prefix in o.name)
+                    base_name = example_obj.name
+                    if props.batch_name_replace_old:
+                        base_name = base_name.replace(props.batch_name_replace_old, props.batch_name_replace_new)
+                    final_example = f"{props.batch_name_add_prefix}{base_name}{props.batch_name_add_suffix}"
+                    layout.label(text=f"Example: {final_example}", icon='FILE_BLANK')
+                    
+            layout.operator("arantools.batch_primitive_buildings", text="Generate All (Batch)", icon='GROUP')
 
     def _draw_t_tree_rings(self, layout, context):
         container = context.scene.arantools_tree_rings
