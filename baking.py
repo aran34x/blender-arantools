@@ -292,13 +292,14 @@ def _nearest_dmatrix(low_world, low_pid, low_P, high_world, high_pid, high_P,
 
 
 def _assign_pairs(D):
-    """Greedy bijective assignment from a (P, P) distance matrix. Returns a
-    list `low_to_high` where low_to_high[i] is the high index paired with low i.
+    """Greedy bijective assignment from a distance matrix. Returns a
+    list `low_to_high` where low_to_high[i] is the high index paired with low i,
+    or -1 if unassigned.
     """
     import numpy as np
-    P = D.shape[0]
+    P_low, P_high = D.shape
     rows, cols = np.unravel_index(np.argsort(D, axis=None), D.shape)
-    low_to_high = [-1] * P
+    low_to_high = [-1] * P_low
     used_l, used_h = set(), set()
     for li, hi in zip(rows.tolist(), cols.tolist()):
         if li in used_l or hi in used_h:
@@ -306,7 +307,7 @@ def _assign_pairs(D):
         low_to_high[li] = hi
         used_l.add(li)
         used_h.add(hi)
-        if len(used_l) == P:
+        if len(used_l) == P_low or len(used_h) == P_high:
             break
     return low_to_high
 
@@ -323,8 +324,13 @@ def _grid_offsets(low_world, low_pid, low_P, high_world, high_pid, high_P,
     hmin, hmax = _part_bounds(high_world, high_pid, high_P)
     l2h = np.array(low_to_high, dtype=np.int64)
 
-    pair_min = np.minimum(lmin, hmin[l2h])
-    pair_max = np.maximum(lmax, hmax[l2h])
+    pair_min = lmin.copy()
+    pair_max = lmax.copy()
+    valid = l2h >= 0
+    if np.any(valid):
+        pair_min[valid] = np.minimum(lmin[valid], hmin[l2h[valid]])
+        pair_max[valid] = np.maximum(lmax[valid], hmax[l2h[valid]])
+
     pair_center = (pair_min + pair_max) * 0.5
     cell = float((pair_max - pair_min).max()) * (1.0 + max(0.0, margin_factor))
     cell = max(cell, 1e-4)
@@ -332,12 +338,19 @@ def _grid_offsets(low_world, low_pid, low_P, high_world, high_pid, high_P,
     cols = int(np.ceil(np.sqrt(low_P)))
     low_offsets = np.zeros((low_P, 3), dtype=np.float32)
     high_offsets = np.zeros((high_P, 3), dtype=np.float32)
+
+    assigned_highs = set(h for h in low_to_high if h >= 0)
+    for j in range(high_P):
+        if j not in assigned_highs:
+            high_offsets[j] = np.array([0.0, 0.0, -10000.0], dtype=np.float32)
+
     for i in range(low_P):
         r, c = divmod(i, cols)
         target = np.array([c * cell, r * cell, 0.0], dtype=np.float32)
         off = target - pair_center[i]
         low_offsets[i] = off
-        high_offsets[low_to_high[i]] = off
+        if low_to_high[i] >= 0:
+            high_offsets[low_to_high[i]] = off
     return low_offsets, high_offsets
 
 
@@ -1371,7 +1384,7 @@ then restore the scene."""
                                 temp_mats, restore_indices, restore_matrices)
             return
         if low_P != high_P:
-            raise RuntimeError(f"island counts differ ({low_P} vs {high_P})")
+            print(f"[AranTools] WARNING: island counts differ ({low_P} vs {high_P}). Unmatched islands will be ignored.")
 
         low_world = _world_coords_np(low)
         high_world = _world_coords_np(high)
@@ -1784,10 +1797,9 @@ you toggle High/Low and the exploded grid before committing to a bake"""
         low_pid, low_P = _loose_part_ids(low.data)
         high_pid, high_P = _loose_part_ids(high.data)
         if low_P != high_P:
-            self.report({'ERROR'},
+            self.report({'WARNING'},
                         f"Island counts differ: {low.name}={low_P}, "
-                        f"{high.name}={high_P}. Equalise before previewing.")
-            return {'CANCELLED'}
+                        f"{high.name}={high_P}. Unmatched islands will be ignored.")
         if low_P <= 1:
             self.report({'ERROR'}, "Only one island — nothing to isolate.")
             return {'CANCELLED'}
@@ -1833,7 +1845,8 @@ you toggle High/Low and the exploded grid before committing to a bake"""
         _write_island_colors(low_prev, low_pid, palette)
         high_palette = [(0.0, 0.0, 0.0, 1.0)] * high_P
         for i in range(low_P):
-            high_palette[low_to_high[i]] = palette[i]
+            if low_to_high[i] >= 0:
+                high_palette[low_to_high[i]] = palette[i]
         _write_island_colors(high_prev, high_pid, high_palette)
 
         def _base(obj):

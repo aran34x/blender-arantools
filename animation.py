@@ -52,6 +52,19 @@ def _iter_action_fcurves(action):
                     yield fc
 
 
+def _find_action_fcurve(action, data_path, index=0):
+    fcurves = getattr(action, 'fcurves', None)
+    if fcurves is not None:
+        try:
+            return fcurves.find(data_path, index=index)
+        except AttributeError:
+            pass
+    for fc in _iter_action_fcurves(action):
+        if fc.data_path == data_path and fc.array_index == index:
+            return fc
+    return None
+
+
 def _is_armature_action(action):
     """True if any fcurve targets a pose bone."""
     for fc in _iter_action_fcurves(action):
@@ -183,7 +196,7 @@ def _collect_rot_args(scene):
 def _collect_loc_args(scene):
     return dict(
         strength          = scene.arantools_location_strenght,
-        scale             = scene.arantools_location_scale,
+        scale             = scene.arantools_location_scale * 10.0,
         axis_strength_mult = scene.arantools_location_axis_multipliers,
         axis_speed_mult   = scene.arantools_location_axis_multiplier_speed,
         strength_divisor  = scene.arantools_location_strength_divisor,
@@ -200,7 +213,8 @@ def _apply_rotation_noise(context):
     for bone in context.selected_pose_bones:
         for channel in ('rotation_euler', 'rotation_quaternion'):
             for axis in range(3):
-                fc = armature.animation_data.action.fcurves.find(
+                fc = _find_action_fcurve(
+                    armature.animation_data.action,
                     f'pose.bones["{bone.name}"].{channel}', index=axis)
                 if fc:
                     _setup_noise(fc, axis, **kwargs, **common)
@@ -214,7 +228,8 @@ def _apply_location_noise(context):
                     blend=scene.arantools_blend_duration)
     for bone in context.selected_pose_bones:
         for axis in range(3):
-            fc = armature.animation_data.action.fcurves.find(
+            fc = _find_action_fcurve(
+                armature.animation_data.action,
                 f'pose.bones["{bone.name}"].location', index=axis)
             if fc:
                 _setup_noise(fc, axis, **kwargs, **common)
@@ -236,6 +251,21 @@ def _check_pose(context):
 # ============================================================================
 # Animation Organization — property group, UI list, operators
 # ============================================================================
+
+class ARANTOOLS_ImportActionItem(bpy.types.PropertyGroup):
+    action_name: bpy.props.StringProperty(name="Action Name")
+    status: bpy.props.EnumProperty(
+        name="Status",
+        items=[
+            ('NEW', "New", "Action does not exist in current file", 'ADD', 1),
+            ('MODIFIED', "Modified", "Action exists but differs", 'MODIFIER', 2),
+            ('UNCHANGED', "Unchanged", "Action is identical", 'CHECKMARK', 3),
+        ]
+    )
+    diff_info: bpy.props.StringProperty(name="Diff Info")
+    do_import: bpy.props.BoolProperty(default=True, name="", description="Import this action")
+    temp_action: bpy.props.PointerProperty(type=bpy.types.Action)
+
 
 class ARANTOOLS_AnimOrg_Props(bpy.types.PropertyGroup):
     armature: bpy.props.PointerProperty(
@@ -276,6 +306,49 @@ class ARANTOOLS_AnimOrg_Props(bpy.types.PropertyGroup):
         default=True,
     )
     action_index: bpy.props.IntProperty(default=0)
+
+    # ── Import Animations ──
+    import_filepath: bpy.props.StringProperty(
+        name="Import File",
+        description="Path to the .blend file containing animations",
+        subtype='FILE_PATH',
+        default="//"
+    )
+    imported_actions: bpy.props.CollectionProperty(type=ARANTOOLS_ImportActionItem)
+    import_active_index: bpy.props.IntProperty(default=0)
+    show_import_panel: bpy.props.BoolProperty(
+        name="Import Animations",
+        description="Show the animation import panel",
+        default=False,
+    )
+
+    # ── Export Settings ──
+    export_folder: bpy.props.StringProperty(
+        name="Export Folder",
+        description="Destination directory for exported actions",
+        subtype='DIR_PATH',
+        default="//"
+    )
+    export_prefix_str: bpy.props.StringProperty(
+        name="Prefix",
+        description="String to prepend to the exported action filename",
+        default=""
+    )
+    export_suffix_str: bpy.props.StringProperty(
+        name="Suffix",
+        description="String to append to the exported action filename",
+        default=""
+    )
+    export_remove_str: bpy.props.StringProperty(
+        name="Remove",
+        description="Comma-separated list of strings to remove from the filename",
+        default=""
+    )
+    show_export_settings: bpy.props.BoolProperty(
+        name="Export Settings",
+        description="Show Auto-Rig Pro individual action export settings",
+        default=False,
+    )
 
     # ── Viewport overlay: show the active action name big in the 3D view ──
     show_visualization: bpy.props.BoolProperty(
@@ -326,6 +399,8 @@ set-active button, delete button."""
                  emboss=False)
         op = row.operator("arantools.animorg_set_active", text="", icon='PLAY')
         op.action_name = action.name
+        op = row.operator("arantools.animorg_export_action_arp", text="", icon='EXPORT')
+        op.action_name = action.name
         op = row.operator("arantools.animorg_delete_action", text="", icon='X')
         op.action_name = action.name
 
@@ -357,6 +432,33 @@ set-active button, delete button."""
 
         flt_neworder = helper.sort_items_by_name(actions, "name")
         return flt_flags, flt_neworder
+
+
+class ARANTOOLS_UL_AnimOrg_ImportedActions(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            
+            # Use smaller font/spacing if needed, but row is fine
+            row.prop(item, "do_import", text="")
+            
+            icon_str = 'NONE'
+            if item.status == 'NEW':
+                icon_str = 'ADD'
+            elif item.status == 'MODIFIED':
+                icon_str = 'MODIFIER'
+            elif item.status == 'UNCHANGED':
+                icon_str = 'CHECKMARK'
+                
+            # Split the row to align columns nicely
+            split = row.split(factor=0.6)
+            split.label(text=item.action_name, icon=icon_str)
+            
+            # Right side status text
+            split.label(text=item.status.capitalize())
+        elif self.layout_type in {'GRID'}:
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon_value=icon)
 
 
 class ARANTOOLS_OT_AnimOrg_NewAction(Operator):
@@ -425,6 +527,115 @@ and (if the name ends in '_NNN') set the scene end frame to N."""
         if duration is not None:
             _apply_duration_to_timeline(context.scene, duration)
         _animorg_last_action[f"{context.scene.name}|{arm.name}"] = action.name
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_AnimOrg_ExportAction_ARP(Operator):
+    """Export this action as a single FBX using Auto-Rig Pro"""
+    bl_idname = "arantools.animorg_export_action_arp"
+    bl_label = "Export Action (ARP)"
+    bl_options = {'REGISTER'}
+
+    action_name: bpy.props.StringProperty()
+
+    @classmethod
+    def description(cls, context, properties):
+        return f"Export action '{properties.action_name}' via Auto-Rig Pro"
+
+    @classmethod
+    def poll(cls, context):
+        has_arp = hasattr(bpy.types, "ARP_OT_export_fbx_panel") or \
+                  "arp_export_fbx_panel" in dir(getattr(bpy.ops, "arp", object()))
+        return has_arp and context.scene.arantools_anim_org.armature is not None
+
+    def execute(self, context):
+        props = context.scene.arantools_anim_org
+        arm = props.armature
+        action = bpy.data.actions.get(self.action_name)
+        
+        if not action or not arm:
+            return {'CANCELLED'}
+
+        import os
+        from .export import _arp_set, _arp_get, _format_name
+        
+        # Ensure directory
+        folder = bpy.path.abspath(props.export_folder)
+        if not os.path.exists(folder):
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except Exception as e:
+                self.report({'ERROR'}, f"Could not create folder: {e}")
+                return {'CANCELLED'}
+        
+        # Determine filename
+        filename = _format_name(self.action_name, props.export_remove_str, props.export_prefix_str, props.export_suffix_str)
+        if not filename.strip():
+            self.report({'ERROR'}, "Resulting filename is empty. Check prefix/suffix/remove settings.")
+            return {'CANCELLED'}
+            
+        filepath = os.path.join(folder, f"{filename}.fbx")
+
+        # Save current state
+        prev_action = arm.animation_data.action if arm.animation_data else None
+        
+        # Set to target action
+        _assign_action(arm, action)
+        
+        # Ensure arm is active and selected
+        prev_active = context.view_layer.objects.active
+        prev_selected = context.selected_objects.copy()
+        
+        bpy.ops.object.select_all(action='DESELECT')
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+
+        # Save ARP settings
+        scene = context.scene
+        prev_sel_only     = _arp_get(scene, 'arp_ge_sel_only', None)
+        prev_bake_anim    = _arp_get(scene, 'arp_bake_anim',   None)
+        prev_separate_fbx = _arp_get(scene, 'arp_export_separate_fbx', None)
+        prev_only_active  = _arp_get(scene, 'arp_bake_only_active', None)
+
+        # Apply temporary ARP settings
+        _arp_set(scene, 'arp_ge_sel_only', True)
+        _arp_set(scene, 'arp_bake_anim', True)
+        _arp_set(scene, 'arp_export_separate_fbx', False)
+        _arp_set(scene, 'arp_bake_only_active', True)
+
+        # Export
+        try:
+            bpy.ops.arp.arp_export_fbx_panel(filepath=filepath)
+            self.report({'INFO'}, f"Exported: {filename}.fbx")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to export: {e}")
+            print(f"ARP Export Error: {e}")
+        finally:
+            # Restore ARP
+            if prev_sel_only     is not None: _arp_set(scene, 'arp_ge_sel_only', prev_sel_only)
+            if prev_bake_anim    is not None: _arp_set(scene, 'arp_bake_anim', prev_bake_anim)
+            if prev_separate_fbx is not None: _arp_set(scene, 'arp_export_separate_fbx', prev_separate_fbx)
+            if prev_only_active  is not None: _arp_set(scene, 'arp_bake_only_active', prev_only_active)
+            
+            # Restore selection
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in prev_selected:
+                try:
+                    obj.select_set(True)
+                except ReferenceError:
+                    pass
+            if prev_active:
+                try:
+                    context.view_layer.objects.active = prev_active
+                except ReferenceError:
+                    pass
+            
+            # Restore action
+            if prev_action:
+                _assign_action(arm, prev_action)
+            elif arm.animation_data:
+                arm.animation_data.action = None
+
         return {'FINISHED'}
 
 
@@ -538,6 +749,186 @@ Useful after renaming an action manually."""
         _animorg_last_action[f"{context.scene.name}|{arm.name}"] = action.name
         self.report({'INFO'},
                     f"Timeline set to {props.start_frame}–{duration}.")
+        return {'FINISHED'}
+
+
+def _compare_actions(action_a, action_b):
+    if action_a is None or action_b is None:
+        return False
+    
+    fcurves_a = list(_iter_action_fcurves(action_a))
+    fcurves_b = list(_iter_action_fcurves(action_b))
+    
+    if len(fcurves_a) != len(fcurves_b):
+        return False
+    
+    # Sort fcurves to ensure matching pairs
+    fcurves_a.sort(key=lambda f: (f.data_path, f.array_index))
+    fcurves_b.sort(key=lambda f: (f.data_path, f.array_index))
+    
+    for fc_a, fc_b in zip(fcurves_a, fcurves_b):
+        if fc_a.data_path != fc_b.data_path or fc_a.array_index != fc_b.array_index:
+            return False
+        if len(fc_a.keyframe_points) != len(fc_b.keyframe_points):
+            return False
+        for kp_a, kp_b in zip(fc_a.keyframe_points, fc_b.keyframe_points):
+            # Precision tolerance for floating point comparison
+            if abs(kp_a.co.x - kp_b.co.x) > 1e-4 or abs(kp_a.co.y - kp_b.co.y) > 1e-4:
+                return False
+    return True
+
+
+class ARANTOOLS_OT_AnimOrg_LoadExternal(bpy.types.Operator):
+    bl_idname = "arantools.animorg_load_external"
+    bl_label = "Load & Compare Actions"
+    bl_description = "Loads actions from the selected file and compares them to local actions"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        props = context.scene.arantools_anim_org
+        if not props.import_filepath:
+            self.report({'ERROR'}, "No file selected.")
+            return {'CANCELLED'}
+        
+        filepath = bpy.path.abspath(props.import_filepath)
+        import os
+        if not os.path.exists(filepath):
+            self.report({'ERROR'}, "File not found.")
+            return {'CANCELLED'}
+
+        # Cancel any previous import to clean up temp actions
+        bpy.ops.arantools.animorg_cancel_import()
+
+        try:
+            with bpy.data.libraries.load(filepath, link=False) as (data_from, data_to):
+                original_action_names = list(data_from.actions)
+                data_to.actions = data_from.actions
+        except OSError:
+            self.report({'ERROR'}, "Failed to read blend file.")
+            return {'CANCELLED'}
+
+        for i, appended_act in enumerate(data_to.actions):
+            if appended_act is None:
+                continue
+            
+            original_name = original_action_names[i]
+            # prefix with a dot so Blender hides it from the UI lists!
+            appended_act.name = "._temp_import_" + original_name
+            appended_act.use_fake_user = True 
+            
+            item = props.imported_actions.add()
+            item.action_name = original_name
+            item.temp_action = appended_act
+            
+            local_act = bpy.data.actions.get(original_name)
+            if local_act is None:
+                item.status = 'NEW'
+                item.diff_info = "Action is new"
+                item.do_import = True
+            else:
+                if _compare_actions(local_act, appended_act):
+                    item.status = 'UNCHANGED'
+                    item.diff_info = "Identical to local"
+                    item.do_import = False
+                else:
+                    item.status = 'MODIFIED'
+                    item.diff_info = "Keyframes differ"
+                    item.do_import = True
+                    
+        self.report({'INFO'}, f"Loaded {len(data_to.actions)} actions for review.")
+        return {'FINISHED'}
+
+
+from bpy_extras.io_utils import ImportHelper
+from bpy.props import StringProperty
+
+class ARANTOOLS_OT_AnimOrg_ImportDialog(bpy.types.Operator, ImportHelper):
+    """Select a .blend file to import and review animations from"""
+    bl_idname = "arantools.animorg_import_dialog"
+    bl_label = "Import Animations"
+    
+    filter_glob: StringProperty(
+        default="*.blend",
+        options={'HIDDEN'},
+    )
+
+    def execute(self, context):
+        props = context.scene.arantools_anim_org
+        props.import_filepath = self.filepath
+        props.show_import_panel = True
+        
+        bpy.ops.arantools.animorg_load_external()
+        return {'FINISHED'}
+
+
+
+
+class ARANTOOLS_OT_AnimOrg_ApplyImport(bpy.types.Operator):
+    bl_idname = "arantools.animorg_apply_import"
+    bl_label = "Apply Import"
+    bl_description = "Apply the selected actions and clean up"
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.scene.arantools_anim_org.imported_actions) > 0
+
+    def execute(self, context):
+        props = context.scene.arantools_anim_org
+        
+        imported = 0
+        for item in list(props.imported_actions):
+            if not item.temp_action:
+                continue
+            
+            if item.do_import and item.status in {'NEW', 'MODIFIED'}:
+                local_act = bpy.data.actions.get(item.action_name)
+                temp_act = item.temp_action
+                
+                if local_act:
+                    # Remove the local one completely
+                    local_act.user_clear()
+                    bpy.data.actions.remove(local_act)
+                
+                # Now rename temp to the original name
+                temp_act.name = item.action_name
+                temp_act.use_fake_user = True
+                imported += 1
+            else:
+                # Discard temp action
+                item.temp_action.user_clear()
+                bpy.data.actions.remove(item.temp_action)
+                
+        props.imported_actions.clear()
+        self.report({'INFO'}, f"Successfully imported {imported} actions.")
+        
+        # Trigger an update of the viewport or dependencies
+        context.view_layer.update()
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_AnimOrg_CancelImport(bpy.types.Operator):
+    bl_idname = "arantools.animorg_cancel_import"
+    bl_label = "Cancel / Clear"
+    bl_description = "Cancel import and remove temporary actions"
+
+    def execute(self, context):
+        props = context.scene.arantools_anim_org
+        
+        for item in props.imported_actions:
+            if item.temp_action:
+                item.temp_action.user_clear()
+                bpy.data.actions.remove(item.temp_action)
+                
+        # Also clean up any orphan ._temp_import_ actions
+        for act in list(bpy.data.actions):
+            if act.name.startswith("._temp_import_"):
+                act.user_clear()
+                bpy.data.actions.remove(act)
+                
+        props.imported_actions.clear()
         return {'FINISHED'}
 
 
@@ -714,7 +1105,7 @@ def _collect_smooth_fcurves(context, props):
     scl_axes = props.scale_axes
 
     out = []
-    for fc in obj.animation_data.action.fcurves:
+    for fc in _iter_action_fcurves(obj.animation_data.action):
         m = _POSE_BONE_DP.match(fc.data_path)
         if not m:
             continue
@@ -935,7 +1326,7 @@ def _decimate_fcurves(context, target_fcurves, mode, error, ratio):
     # Select only the target curves' keys; deselect everything else so
     # decimate doesn't touch unrelated channels.
     target_ids = {id(fc) for fc in target_fcurves}
-    for fc in action.fcurves:
+    for fc in _iter_action_fcurves(action):
         is_target = id(fc) in target_ids
         fc.select = is_target
         for kp in fc.keyframe_points:
@@ -1144,7 +1535,7 @@ to the selected pose bones in the active action."""
         removed = 0
         for bone in context.selected_pose_bones:
             prefix = f'pose.bones["{bone.name}"]'
-            for fc in action.fcurves:
+            for fc in _iter_action_fcurves(action):
                 if not fc.data_path.startswith(prefix):
                     continue
                 for mod in list(fc.modifiers):
@@ -1155,18 +1546,143 @@ to the selected pose bones in the active action."""
         return {'FINISHED'}
 
 
+class ARANTOOLS_OT_Apply_Cycles(Operator):
+    """Add a Cycles modifier at the top of the modifier stack for every F-curve belonging
+to the selected pose bones."""
+    bl_idname  = "arantools.apply_cycles"
+    bl_label   = "Add Cycles Before Noise"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'POSE'
+                and context.active_object
+                and context.active_object.animation_data
+                and context.active_object.animation_data.action)
+
+    def execute(self, context):
+        action = context.active_object.animation_data.action
+        added = 0
+        for bone in context.selected_pose_bones:
+            prefix = f'pose.bones["{bone.name}"]'
+            for fc in _iter_action_fcurves(action):
+                if not fc.data_path.startswith(prefix):
+                    continue
+                
+                if fc.modifiers and fc.modifiers[0].type == 'CYCLES':
+                    continue
+                
+                mod_cache = []
+                for mod in list(fc.modifiers):
+                    if mod.type == 'CYCLES': 
+                        fc.modifiers.remove(mod)
+                        continue
+                    
+                    props = {}
+                    for k in dir(mod):
+                        if k.startswith('_') or k in ('rna_type', 'type', 'is_valid', 'bl_rna'): continue
+                        try:
+                            props[k] = getattr(mod, k)
+                        except Exception:
+                            pass
+                    
+                    mod_type = mod.type
+                    fc.modifiers.remove(mod)
+                    mod_cache.append((mod_type, props))
+                
+                fc.modifiers.new(type='CYCLES')
+                added += 1
+                
+                for m_type, props in mod_cache:
+                    new_m = fc.modifiers.new(type=m_type)
+                    for k, v in props.items():
+                        try:
+                            if k == 'coefficients' and m_type == 'GENERATOR':
+                                for i in range(min(len(new_m.coefficients), len(v))):
+                                    new_m.coefficients[i] = v[i]
+                            else:
+                                setattr(new_m, k, v)
+                        except Exception:
+                            pass
+                            
+        self.report({'INFO'}, f"Added {added} Cycles modifiers at the top.")
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_FixLoop(Operator):
+    """Make the last keyframe of all channels match the first keyframe's value,
+and move the last keyframe to (Last Frame + 1)."""
+    bl_idname = "arantools.fix_loop"
+    bl_label = "Fix Loop"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'POSE'
+                and context.active_object
+                and context.active_object.animation_data
+                and context.active_object.animation_data.action)
+
+    def execute(self, context):
+        action = context.active_object.animation_data.action
+        scene = context.scene
+        
+        duration = scene.arantools_fix_loop_duration
+        
+        fixed_count = 0
+        
+        selected_prefixes = [f'pose.bones["{b.name}"]' for b in context.selected_pose_bones]
+        
+        for fc in _iter_action_fcurves(action):
+            if not any(fc.data_path.startswith(p) for p in selected_prefixes):
+                continue
+            
+            kpts = fc.keyframe_points
+            if len(kpts) < 2:
+                continue
+            
+            first_key = kpts[0]
+            last_key = kpts[-1]
+            
+            val = first_key.co.y
+            
+            target_frame = first_key.co.x + duration
+            dx = target_frame - last_key.co.x
+            dy = val - last_key.co.y
+            
+            last_key.co.x += dx
+            last_key.co.y += dy
+            last_key.handle_left.x += dx
+            last_key.handle_left.y += dy
+            last_key.handle_right.x += dx
+            last_key.handle_right.y += dy
+            
+            fixed_count += 1
+            
+        action.update_tag()
+        self.report({'INFO'}, f"Fixed loop on {fixed_count} F-Curves.")
+        return {'FINISHED'}
+
+
 # ============================================================================
 # Registration
 # ============================================================================
 
 classes = [
+    ARANTOOLS_ImportActionItem,
     ARANTOOLS_AnimOrg_Props,
     ARANTOOLS_UL_AnimOrg_Actions,
+    ARANTOOLS_UL_AnimOrg_ImportedActions,
     ARANTOOLS_OT_AnimOrg_NewAction,
     ARANTOOLS_OT_AnimOrg_SetActive,
     ARANTOOLS_OT_AnimOrg_Delete,
+    ARANTOOLS_OT_AnimOrg_ExportAction_ARP,
     ARANTOOLS_OT_AnimOrg_PurgeForeign,
     ARANTOOLS_OT_AnimOrg_SyncTimeline,
+    ARANTOOLS_OT_AnimOrg_LoadExternal,
+    ARANTOOLS_OT_AnimOrg_ImportDialog,
+    ARANTOOLS_OT_AnimOrg_ApplyImport,
+    ARANTOOLS_OT_AnimOrg_CancelImport,
     ARANTOOLS_CurveSmooth_Props,
     ARANTOOLS_OT_SpringSmoothCurves,
     ARANTOOLS_OT_DecimateCurves,
@@ -1174,6 +1690,8 @@ classes = [
     ARANTOOLS_OT_Apply_Noise_Location,
     ARANTOOLS_OT_Apply_Noise_Both,
     ARANTOOLS_OT_Remove_Noise,
+    ARANTOOLS_OT_Apply_Cycles,
+    ARANTOOLS_OT_FixLoop,
 ]
 
 
@@ -1279,6 +1797,11 @@ def register():
         description='Show per-axis multipliers and divisor overrides',
         default=False)
 
+    bpy.types.Scene.arantools_fix_loop_duration = bpy.props.FloatProperty(
+        name='Loop Duration',
+        description='Duration of the loop (distance between first and last keyframe)',
+        default=24.0)
+
 
 def unregister():
     _animorg_overlay_unregister()
@@ -1288,6 +1811,7 @@ def unregister():
     del bpy.types.Scene.arantools_anim_org
 
     del bpy.types.Scene.arantools_advanced_options
+    del bpy.types.Scene.arantools_fix_loop_duration
     del bpy.types.Scene.arantools_location_axis_multiplier_speed
     del bpy.types.Scene.arantools_location_axis_multipliers
     del bpy.types.Scene.arantools_rotation_axis_multiplier_speed

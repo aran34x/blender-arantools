@@ -278,6 +278,115 @@ class ARANTOOLS_OT_CollectionBake(Operator):
         return {'FINISHED'}
 
 
+class ARANTOOLS_OT_MatchBounds(Operator):
+    """Move and scale selected objects to match the bounding box of the active object"""
+    bl_idname = "arantools.match_bounds"
+    bl_label = "Match Bounding Box"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    match_loc_x: bpy.props.BoolProperty(name="Location X", default=True)
+    match_loc_y: bpy.props.BoolProperty(name="Location Y", default=True)
+    match_loc_z: bpy.props.BoolProperty(name="Location Z", default=True)
+    
+    match_scale_x: bpy.props.BoolProperty(name="Scale X", default=True)
+    match_scale_y: bpy.props.BoolProperty(name="Scale Y", default=True)
+    match_scale_z: bpy.props.BoolProperty(name="Scale Z", default=True)
+
+    use_selected_verts_target: bpy.props.BoolProperty(name="Target Selected Verts Only", default=False, description="Consider only the bounding box of selected vertices on the target")
+    use_selected_verts_source: bpy.props.BoolProperty(name="Source Selected Verts Only", default=False, description="Consider only the bounding box of selected vertices on the source")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "use_selected_verts_target")
+        layout.prop(self, "use_selected_verts_source")
+        layout.separator()
+        layout.label(text="Match Location:")
+        row = layout.row()
+        row.prop(self, "match_loc_x", text="X")
+        row.prop(self, "match_loc_y", text="Y")
+        row.prop(self, "match_loc_z", text="Z")
+        layout.label(text="Match Scale:")
+        row = layout.row()
+        row.prop(self, "match_scale_x", text="X")
+        row.prop(self, "match_scale_y", text="Y")
+        row.prop(self, "match_scale_z", text="Z")
+
+    def execute(self, context):
+        import mathutils
+        import bmesh
+        target = context.active_object
+        if not target or target.type != 'MESH':
+            self.report({'ERROR'}, "Active object must be a mesh.")
+            return {'CANCELLED'}
+
+        sources = [obj for obj in context.selected_objects if obj != target and obj.type == 'MESH']
+        if not sources:
+            self.report({'ERROR'}, "Select at least one other mesh.")
+            return {'CANCELLED'}
+
+        def get_world_bounds(obj, use_selected):
+            verts_world = []
+            if use_selected:
+                if obj.mode == 'EDIT':
+                    bm = bmesh.from_edit_mesh(obj.data)
+                    verts_world = [obj.matrix_world @ v.co for v in bm.verts if v.select]
+                else:
+                    verts_world = [obj.matrix_world @ v.co for v in obj.data.vertices if v.select]
+                
+                if not verts_world:
+                    return None
+            else:
+                corners = [obj.matrix_world @ mathutils.Vector(b) for b in obj.bound_box]
+                verts_world = corners
+                
+            min_x = min(v.x for v in verts_world)
+            max_x = max(v.x for v in verts_world)
+            min_y = min(v.y for v in verts_world)
+            max_y = max(v.y for v in verts_world)
+            min_z = min(v.z for v in verts_world)
+            max_z = max(v.z for v in verts_world)
+            
+            return (mathutils.Vector((min_x, min_y, min_z)), 
+                    mathutils.Vector((max_x, max_y, max_z)))
+
+        bounds_t = get_world_bounds(target, self.use_selected_verts_target)
+        if not bounds_t:
+            self.report({'ERROR'}, f"No vertices selected on target '{target.name}'.")
+            return {'CANCELLED'}
+            
+        t_min, t_max = bounds_t
+        t_center = (t_min + t_max) / 2
+        t_dim = t_max - t_min
+
+        for src in sources:
+            bounds_s = get_world_bounds(src, self.use_selected_verts_source)
+            if not bounds_s:
+                self.report({'ERROR'}, f"No vertices selected on source '{src.name}'.")
+                continue
+                
+            s_min, s_max = bounds_s
+            s_center = (s_min + s_max) / 2
+            s_dim = s_max - s_min
+            
+            scale_x = t_dim.x / s_dim.x if self.match_scale_x and s_dim.x > 0.0001 else 1.0
+            scale_y = t_dim.y / s_dim.y if self.match_scale_y and s_dim.y > 0.0001 else 1.0
+            scale_z = t_dim.z / s_dim.z if self.match_scale_z and s_dim.z > 0.0001 else 1.0
+            
+            S = mathutils.Matrix.Diagonal((scale_x, scale_y, scale_z, 1.0))
+            
+            target_pos = s_center.copy()
+            if self.match_loc_x: target_pos.x = t_center.x
+            if self.match_loc_y: target_pos.y = t_center.y
+            if self.match_loc_z: target_pos.z = t_center.z
+            
+            T_to_origin = mathutils.Matrix.Translation(-s_center)
+            T_to_target = mathutils.Matrix.Translation(target_pos)
+            
+            src.matrix_world = T_to_target @ S @ T_to_origin @ src.matrix_world
+
+        return {'FINISHED'}
+
+
 # ============================================================================
 # Registration
 # ============================================================================
@@ -291,6 +400,7 @@ classes = [
     ARANTOOLS_PG_BakeObject,
     ARANTOOLS_PG_BakeScene,
     ARANTOOLS_OT_CollectionBake,
+    ARANTOOLS_OT_MatchBounds,
 ]
 
 

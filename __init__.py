@@ -12,6 +12,7 @@ import bpy
 from bpy.types import Panel
 
 from . import rigging
+from . import auto_weights
 from . import animation
 from . import naming
 from . import weight_tools
@@ -77,10 +78,12 @@ _TOOL_REGISTRY = [
     # is_small=True: always expanded, no collapse toggle (for single-button tools)
     ('select_deform',  'Select Deform Bones',   'Select all bones with the Deform flag enabled',                                    'RIGGING',      'BONE_DATA',          '_draw_t_select_deform',  True),
     ('snap_bones',     'Snap Bones to Empties',  'In Armature Edit Mode, snap the selected bones\' joints to the closest visible empty in the scene', 'RIGGING', 'EMPTY_ARROWS',   '_draw_t_snap_bones',     False),
+    ('auto_weights',   'Auto Weights (Selected)','Bind the selected mesh(es) to the armature with Blender\'s Automatic Weights, restricted to the selected bones and/or the selected mesh parts via checkboxes', 'RIGGING', 'MOD_VERTEX_WEIGHT', '_draw_t_auto_weights', False),
     ('feather_rigger', 'Feather Rigger',         'Auto-rig feather or hair mesh islands to bone chains',                            'RIGGING',      'OUTLINER_OB_CURVES', '_draw_t_feather_rigger', False),
     ('join_bind',      'Join & Bind',            'Join costume meshes and bind them to a character by transferring weights',         'RIGGING',      'MOD_DATA_TRANSFER',  '_draw_t_join_bind',      False),
     ('weight_pointer',   'Weight from Pointer',      'Bind mesh islands to bones via sharp edge or UV pointers — requires Auto-Rig Pro', 'RIGGING', 'CURVE_PATH',        '_draw_t_weight_pointer',   False),
     ('island_flatten',   'Flatten Island Weights',   'Average deform bone weights across each mesh island so the island bends as a rigid unit', 'RIGGING', 'MOD_SMOOTH', '_draw_t_island_flatten',   False),
+    ('auto_weights_w', 'Auto Weights (Selected)','Bind the selected mesh(es) to the armature with Blender\'s Automatic Weights, restricted to the selected bones and/or the selected mesh parts via checkboxes', 'WEIGHT', 'MOD_VERTEX_WEIGHT', '_draw_t_auto_weights', False),
     ('smart_transfer', 'Smart Weight Transfer',  'Copy vertex weights from a source mesh with interpolation options',               'WEIGHT',       'MOD_DATA_TRANSFER',  '_draw_t_smart_transfer', False),
     ('sync_vgroups',   'Sync Vertex Groups',     'Add missing vertex groups from the armature to the active mesh',                  'WEIGHT',       'GROUP_VERTEX',       '_draw_t_sync_vgroups',   True),
     ('unify_island',   'Unify Island Weights',   'Blend and unify vertex weights uniformly across UV islands',                      'WEIGHT',       'SNAP_FACE',          '_draw_t_unify_island',   False),
@@ -90,6 +93,7 @@ _TOOL_REGISTRY = [
     ('batch_rig',      'Batch Rig Transfer',     'Transfer rigs from a source collection to a target collection in bulk',           'ORGANIZATION', 'ARMATURE_DATA',      '_draw_t_batch_rig',      False),
     ('coll_baker',     'Collection Baker',       'Bake and rename meshes from one collection into another',                         'ORGANIZATION', 'RENDER_STILL',       '_draw_t_coll_baker',     False),
     ('mod_sync',       'Modifier Sync',          'Save a modifier stack from one object and copy or sync it to other objects',       'ORGANIZATION', 'MODIFIER',           '_draw_t_mod_sync',       False),
+    ('match_bounds',   'Match Bounding Box',     'Move and scale selected objects to match the bounding box of the active object',  'ORGANIZATION', 'OBJECT_ORIGIN',      '_draw_t_match_bounds',   False),
     ('tree_branch',    'Branch Skeleton',        'Author a tree as a vertex-only mesh. Select the trunk-base vertex, hit Setup, and the tool partitions the skeleton into branches and writes radius/tilt/branch_id attributes for the geonode to read', 'TREE', 'CURVE_PATH', '_draw_t_tree_branch',    False),
     ('tree_tubes',     'Branch Tubes Geonode',   'Add a Geometry Nodes modifier that sweeps a circular profile along each branch of a skeleton, producing closed-tip / open-base tubes with auto UV0', 'TREE', 'MESH_CYLINDER', '_draw_t_tree_tubes', False),
     ('tree_uv',        'Branch UV Geonode',      'Add a Geometry Nodes modifier that bakes wind/identification UVs (UVMap2, UVMap3) and the vertex-color Attribute onto a branch mesh, matching the SpeedTree-style encoding', 'TREE', 'NODETREE', '_draw_t_tree_uv',     False),
@@ -104,6 +108,7 @@ _TOOL_REGISTRY = [
     ('anim_org',       'Animation Organization', 'Manage an armature\'s actions: list, create (with Fake User), and auto-set the timeline from a "_NNN" duration suffix', 'ANIMATION', 'ACTION',           '_draw_t_anim_org',       False),
     ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
+    ('anim_loop',      'Animation Loop Tools',   'Tools for looping animations', 'ANIMATION', 'FILE_REFRESH', '_draw_t_anim_loop', False),
     ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'EXTRAS', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
     ('primitive_buildings', 'Primitive Buildings Tool', 'Takes selected meshes, duplicates, joins, Smart UV projects, rotates islands to align wood grain to longest 3D bounding box edge, and separates UVs into quadrants by material', 'EXTRAS', 'MESH_CUBE', '_draw_t_primitive_buildings', False),
     ('tree_retopo',    'Branch Retopo (Sweep)',  'Auto-retopologise an organic branch/tree sculpt into clean quad cylinders with cylinder UVs. Detect an editable centerline skeleton (finds the cylinders / branch splits), then generate surface-fitted rings with smooth junctions. SpeedTree-style clean cage; fine bark detail goes to the Normal Map Baker', 'EXTRAS', 'MESH_CYLINDER', '_draw_t_tree_retopo', False),
@@ -278,6 +283,50 @@ class ARANTOOLS_PT_main(Panel):
         row.operator("arantools.snap_bones_to_empties",
                      text="Snap to Nearest Empty", icon='SNAP_ON')
         col.label(text="Snaps to the closest visible empty.", icon='EMPTY_ARROWS')
+
+    def _draw_t_auto_weights(self, layout, context):
+        props = context.scene.arantools_auto_weights
+
+        sel = context.selected_objects
+        meshes = [o for o in sel if o.type == 'MESH']
+        armature = None
+        active = context.active_object
+        if active is not None and active.type == 'ARMATURE':
+            armature = active
+        else:
+            armature = next((o for o in sel if o.type == 'ARMATURE'), None)
+
+        # ── THE BUTTON (top, always visible) ──────────────────────────────
+        run = layout.row()
+        run.scale_y = 1.8
+        run.enabled = bool(meshes) and armature is not None
+        run.operator("arantools.auto_weights_selected",
+                     text="Auto Weights", icon='MOD_VERTEX_WEIGHT')
+
+        col = layout.column(align=True)
+
+        # ── Selection status ──────────────────────────────────────────────
+        if not meshes:
+            col.label(text="Select mesh(es) + the armature.", icon='ERROR')
+        elif armature is None:
+            col.label(text="Also select the armature.", icon='ERROR')
+        else:
+            col.label(text=f"{len(meshes)} mesh(es)  →  {armature.name}",
+                      icon='CHECKMARK')
+
+        col.separator()
+
+        # ── Scope checkboxes ──────────────────────────────────────────────
+        col.label(text="Scope:", icon='FILTER')
+        col.prop(props, "only_selected_bones")
+        if props.only_selected_bones:
+            col.label(text="Select bones in Pose/Edit Mode.", icon='BONE_DATA')
+        col.prop(props, "only_selected_verts")
+        if props.only_selected_verts:
+            col.label(text="Select verts in Edit Mode first.", icon='INFO')
+
+        col.label(text="Selected parts are rigged as their own mesh.",
+                  icon='INFO')
 
     def _draw_t_feather_rigger(self, layout, context):
         fr = context.scene.arantools_feather_rig
@@ -1775,6 +1824,9 @@ class ARANTOOLS_PT_main(Panel):
             else:
                 col.label(text="No previous selection saved.", icon='INFO')
 
+    def _draw_t_match_bounds(self, layout, context):
+        layout.operator("arantools.match_bounds", icon='OBJECT_ORIGIN')
+
     def _draw_t_seq_namer(self, layout, context):
         props = context.scene.arantools_seq_namer
         col = layout.column(align=True)
@@ -1900,6 +1952,81 @@ class ARANTOOLS_PT_main(Panel):
         create_row.scale_y = 1.3
         create_row.operator("arantools.animorg_new_action",
                             text="Create & Activate", icon='ADD')
+
+        # ── Export Settings (collapsible) ────────────────────────────────
+        col.separator()
+        exp_box = col.box()
+        exp_header = exp_box.row(align=True)
+        exp_header.prop(props, "show_export_settings",
+                        icon='TRIA_DOWN' if props.show_export_settings else 'TRIA_RIGHT',
+                        text="", emboss=False)
+        exp_header.label(text="Quick Export Settings", icon='EXPORT')
+
+        if props.show_export_settings:
+            from . import export as _export
+            has_arp = hasattr(bpy.types, "ARP_OT_export_fbx_panel") or \
+                      "arp_export_fbx_panel" in dir(getattr(bpy.ops, "arp", object()))
+            
+            exp_body = exp_box.column(align=True)
+            if not has_arp:
+                exp_body.label(text="Requires Auto-Rig Pro addon", icon='ERROR')
+            else:
+                exp_body.prop(props, "export_folder", text="Folder")
+                exp_body.separator()
+                
+                exp_body.label(text="Action Naming:", icon='OBJECT_DATAMODE')
+                exp_body.prop(props, "export_remove_str", text="Remove")
+                row_naming = exp_body.row(align=True)
+                row_naming.prop(props, "export_prefix_str", text="Prefix")
+                row_naming.prop(props, "export_suffix_str", text="Suffix")
+                
+                # Live Preview
+                exp_body.separator()
+                if len(bpy.data.actions) > 0 and props.action_index < len(bpy.data.actions):
+                    act = bpy.data.actions[props.action_index]
+                    final_name = _export._format_name(act.name, props.export_remove_str, props.export_prefix_str, props.export_suffix_str)
+                    
+                    preview_box = exp_body.box()
+                    preview_box.label(text="Preview (from list selection):", icon='HIDE_OFF')
+                    preview_box.label(text="Org:  " + act.name, icon='ACTION')
+                    if not final_name:
+                        preview_box.label(text="New:  [EMPTY NAME]", icon='ERROR')
+                    else:
+                        preview_box.label(text="New:  " + final_name + ".fbx", icon='FORWARD')
+                else:
+                    exp_body.label(text="Select an action to preview naming.", icon='INFO')
+
+        # ── Import Animations (collapsible) ──────────────────────────────
+        col.separator()
+        imp_box = col.box()
+        imp_header = imp_box.row(align=True)
+        imp_header.prop(props, "show_import_panel",
+                        icon='TRIA_DOWN' if props.show_import_panel else 'TRIA_RIGHT',
+                        text="", emboss=False)
+        imp_header.label(text="Import Animations", icon='IMPORT')
+        
+        if props.show_import_panel:
+            imp_body = imp_box.column(align=True)
+            imp_body.prop(props, "import_filepath", text="File")
+            
+            row = imp_body.row()
+            row.scale_y = 1.2
+            row.operator("arantools.animorg_load_external", text="Load & Compare", icon='FILE_REFRESH')
+            
+            if len(props.imported_actions) > 0:
+                imp_body.separator()
+                imp_body.label(text="Actions to Import:", icon='ACTION')
+                imp_body.template_list(
+                    "ARANTOOLS_UL_AnimOrg_ImportedActions", "",
+                    props, "imported_actions",
+                    props, "import_active_index",
+                    rows=5,
+                )
+                
+                row = imp_body.row(align=True)
+                row.scale_y = 1.2
+                row.operator("arantools.animorg_apply_import", text="Apply Selected", icon='CHECKMARK')
+                row.operator("arantools.animorg_cancel_import", text="Cancel", icon='X')
 
     def _draw_t_spring_smooth(self, layout, context):
         props = context.scene.arantools_curve_smooth
@@ -2040,6 +2167,12 @@ class ARANTOOLS_PT_main(Panel):
         col.separator()
         col.operator("arantools.remove_noise", icon='X')
 
+    def _draw_t_anim_loop(self, layout, context):
+        col = layout.column(align=True)
+        col.prop(context.scene, 'arantools_fix_loop_duration')
+        col.operator("arantools.fix_loop", icon='FILE_REFRESH', text="Fix Loop")
+        col.operator("arantools.apply_cycles", icon='FILE_REFRESH', text="Add Cycles Before Noise")
+
 
 # ============================================================================
 # Registration
@@ -2049,20 +2182,27 @@ _TOPBAR_DRAW_KEY = "arantools_export_for_unreal_topbar_draw"
 
 
 def _draw_export_for_unreal_topbar(self, context):
-    """Always-accessible 'Export for Unreal' button in Blender's topbar.
+    """Always-accessible 'Checkout' and 'Export for Unreal' buttons in Blender's topbar.
 
-    Only draws if the underlying operator `object.exportforunreal` is
-    actually registered (the Send-to-Unreal addon may not be enabled in
-    every file/install). When missing we silently skip the button rather
-    than throwing during topbar draw."""
-    op_exists = hasattr(bpy.types, "OBJECT_OT_exportforunreal") or \
-                "exportforunreal" in dir(bpy.ops.object)
-    if not op_exists:
-        return
+    They only draw if the underlying operators (`pptools.checkout_scene` and 
+    `object.exportforunreal`) are registered by their respective addons."""
+    
     self.layout.separator(factor=0.5)
-    self.layout.operator("object.exportforunreal",
-                         text="Export for Unreal",
-                         icon='EXPORT')
+
+    checkout_exists = hasattr(bpy.types, "PPTOOLS_OT_checkout_scene") or \
+                      "checkout_scene" in dir(getattr(bpy.ops, "pptools", object()))
+    if checkout_exists:
+        self.layout.operator("pptools.checkout_scene",
+                             text="Checkout File",
+                             icon='FILE_TICK')
+
+    op_exists = hasattr(bpy.types, "OBJECT_OT_exportforunreal") or \
+                "exportforunreal" in dir(getattr(bpy.ops, "object", object()))
+    
+    if op_exists:
+        self.layout.operator("object.exportforunreal",
+                             text="Export for Unreal",
+                             icon='EXPORT')
 
 
 def _purge_orphan_topbar_buttons():
@@ -2134,6 +2274,7 @@ classes = [
 
 def register():
     rigging.register()
+    auto_weights.register()
     animation.register()
     naming.register()
     weight_tools.register()
@@ -2212,4 +2353,5 @@ def unregister():
     weight_tools.unregister()
     naming.unregister()
     animation.unregister()
+    auto_weights.unregister()
     rigging.unregister()
