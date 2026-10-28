@@ -1912,6 +1912,374 @@ class ARANTOOLS_OT_BakePreviewBake(Operator):
         return bpy.ops.arantools.normal_bake()
 
 
+class ARANTOOLS_PG_DecalProjector(bpy.types.PropertyGroup):
+    projector_obj: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Projector Plane",
+        description="The plane mesh that projects its texture",
+    )
+    receivers: bpy.props.CollectionProperty(
+        type=ARANTOOLS_PG_BakeGroupMember,
+        name="Receivers",
+        description="Meshes to receive the projection",
+    )
+    source_image: bpy.props.PointerProperty(
+        type=bpy.types.Image,
+        name="Source Image",
+        description="The image texture to project",
+    )
+    target_uv_name: bpy.props.StringProperty(
+        name="Target UV Map",
+        description="Name of the UV map to bake to on the receiver meshes",
+        default="UVMap",
+    )
+    resolution: bpy.props.EnumProperty(
+        name="Resolution",
+        description="Output texture size (square)",
+        items=[
+            ('512',  "512",  ""),
+            ('1024', "1024", ""),
+            ('2048', "2048", ""),
+            ('4096', "4096", ""),
+        ],
+        default='2048',
+    )
+    output_name: bpy.props.StringProperty(
+        name="Output Name",
+        description="Name of the new image to bake into",
+        default="ProjectedDecal",
+    )
+    clip_texture: bpy.props.BoolProperty(
+        name="Clip Texture",
+        description="Clip the texture to the projector bounds (prevents repeating)",
+        default=True,
+    )
+    samples: bpy.props.IntProperty(
+        name="Samples",
+        description="Cycles samples for the bake. 1 is usually enough for Emit bakes, higher for anti-aliasing",
+        default=1, min=1, max=64,
+    )
+    margin: bpy.props.IntProperty(
+        name="Margin",
+        description="Pixel bleed past UV island edges. Prevents seams when mip-mapped",
+        default=16, min=0, max=64,
+    )
+    clear_image: bpy.props.BoolProperty(
+        name="Clear Image",
+        description="Erase the target image before baking. Turn off to paint decals over existing textures without erasing",
+        default=False,
+    )
+    show_advanced: bpy.props.BoolProperty(
+        name="Advanced",
+        default=False,
+    )
+
+
+class ARANTOOLS_OT_DecalProjector_AddReceiver(Operator):
+    bl_idname = "arantools.decal_proj_add"
+    bl_label = "Add Receiver"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        context.scene.arantools_decal_projector.receivers.add()
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_DecalProjector_RemoveReceiver(Operator):
+    bl_idname = "arantools.decal_proj_remove"
+    bl_label = "Remove Receiver"
+    bl_options = {'REGISTER', 'UNDO'}
+    index: bpy.props.IntProperty()
+    
+    def execute(self, context):
+        context.scene.arantools_decal_projector.receivers.remove(self.index)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_DecalProjector(Operator):
+    """Project a texture from an active plane onto selected meshes"""
+    bl_idname = "arantools.decal_projector"
+    bl_label = "Bake Decal Projection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        props = context.scene.arantools_decal_projector
+        active = props.projector_obj
+        
+        if not active or active.type != 'MESH':
+            self.report({'ERROR'}, "Please select a valid Projector Plane mesh.")
+            return {'CANCELLED'}
+            
+        receivers = [item.obj for item in props.receivers if item.obj and item.obj.type == 'MESH']
+        
+        if not receivers:
+            self.report({'ERROR'}, "No valid receiver meshes found in the selected collection.")
+            return {'CANCELLED'}
+        
+        source_image = props.source_image
+        if not source_image:
+            self.report({'ERROR'}, "Please select a Source Image to project.")
+            return {'CANCELLED'}
+        
+        # 2. Create target image
+        res = int(props.resolution)
+        img = bpy.data.images.get(props.output_name)
+        if img:
+            if tuple(img.size) != (res, res):
+                try:
+                    img.scale(res, res)
+                except RuntimeError:
+                    pass
+        else:
+            img = bpy.data.images.new(props.output_name, width=res, height=res, alpha=True, float_buffer=False)
+            
+        # 3. Calculate Projector World Space Tangents
+        proj_me = active.data
+        if not proj_me.polygons:
+            self.report({'ERROR'}, "Projector has no faces.")
+            return {'CANCELLED'}
+            
+        if not proj_me.uv_layers.active:
+            self.report({'ERROR'}, "Projector must have an active UV map to define its projection space.")
+            return {'CANCELLED'}
+            
+        poly = proj_me.polygons[0]
+        if len(poly.loop_indices) < 3:
+            self.report({'ERROR'}, "Projector polygon must have at least 3 vertices.")
+            return {'CANCELLED'}
+            
+        l0, l1, l2 = poly.loop_indices[0], poly.loop_indices[1], poly.loop_indices[2]
+        
+        mw = active.matrix_world
+        v0 = mw @ proj_me.vertices[proj_me.loops[l0].vertex_index].co
+        v1 = mw @ proj_me.vertices[proj_me.loops[l1].vertex_index].co
+        v2 = mw @ proj_me.vertices[proj_me.loops[l2].vertex_index].co
+        
+        uv_layer = proj_me.uv_layers.active.data
+        uv0 = uv_layer[l0].uv
+        uv1 = uv_layer[l1].uv
+        uv2 = uv_layer[l2].uv
+        
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        duv1 = uv1 - uv0
+        duv2 = uv2 - uv0
+        
+        det = duv1.x * duv2.y - duv1.y * duv2.x
+        if abs(det) < 1e-6:
+            self.report({'ERROR'}, "Projector UV map has zero area.")
+            return {'CANCELLED'}
+            
+        dPdu = (edge1 * duv2.y - edge2 * duv1.y) / det
+        dPdv = (edge2 * duv1.x - edge1 * duv2.x) / det
+        
+        dot_u = dPdu.dot(dPdu)
+        dot_v = dPdv.dot(dPdv)
+        if dot_u < 1e-6 or dot_v < 1e-6:
+            self.report({'ERROR'}, "Projector geometry is degenerate.")
+            return {'CANCELLED'}
+
+        # 4. Setup receivers
+        temp_materials = []
+        original_materials = {}
+        original_uvs = {}
+        
+        orig_selected = context.selected_objects
+        orig_active = context.active_object
+        
+        try:
+            for obj in receivers:
+                # Store original UV state
+                me = obj.data
+                uv_layers = me.uv_layers
+                if props.target_uv_name not in uv_layers:
+                    self.report({'WARNING'}, f"Object '{obj.name}' missing UV map '{props.target_uv_name}'. Skipping.")
+                    continue
+                    
+                original_uvs[obj] = uv_layers.active
+                uv_layers[props.target_uv_name].active_render = True
+                uv_layers[props.target_uv_name].active = True
+                
+                # Store original materials
+                original_materials[obj] = [slot.material for slot in obj.material_slots]
+                
+                # Create temp material
+                mat = bpy.data.materials.new(name=f"_BakeTemp_{obj.name}")
+                temp_materials.append(mat)
+                mat.use_nodes = True
+                nt = mat.node_tree
+                nodes, links = nt.nodes, nt.links
+                nodes.clear()
+                
+                geo = nodes.new('ShaderNodeNewGeometry')
+                
+                # D = Position - v0
+                sub = nodes.new('ShaderNodeVectorMath')
+                sub.operation = 'SUBTRACT'
+                sub.inputs[1].default_value = (v0.x, v0.y, v0.z)
+                links.new(geo.outputs['Position'], sub.inputs[0])
+                
+                # dot_U = dot(D, dPdu)
+                dot_u_node = nodes.new('ShaderNodeVectorMath')
+                dot_u_node.operation = 'DOT_PRODUCT'
+                dot_u_node.inputs[1].default_value = (dPdu.x, dPdu.y, dPdu.z)
+                links.new(sub.outputs['Vector'], dot_u_node.inputs[0])
+                
+                # U_offset = dot_U / dot(dPdu, dPdu)
+                div_u = nodes.new('ShaderNodeMath')
+                div_u.operation = 'DIVIDE'
+                div_u.inputs[1].default_value = dot_u
+                links.new(dot_u_node.outputs['Value'], div_u.inputs[0])
+                
+                # U = U_offset + uv0.x
+                add_u = nodes.new('ShaderNodeMath')
+                add_u.operation = 'ADD'
+                add_u.inputs[1].default_value = uv0.x
+                links.new(div_u.outputs['Value'], add_u.inputs[0])
+                
+                # dot_V = dot(D, dPdv)
+                dot_v_node = nodes.new('ShaderNodeVectorMath')
+                dot_v_node.operation = 'DOT_PRODUCT'
+                dot_v_node.inputs[1].default_value = (dPdv.x, dPdv.y, dPdv.z)
+                links.new(sub.outputs['Vector'], dot_v_node.inputs[0])
+                
+                # V_offset = dot_V / dot(dPdv, dPdv)
+                div_v = nodes.new('ShaderNodeMath')
+                div_v.operation = 'DIVIDE'
+                div_v.inputs[1].default_value = dot_v
+                links.new(dot_v_node.outputs['Value'], div_v.inputs[0])
+                
+                # V = V_offset + uv0.y
+                add_v = nodes.new('ShaderNodeMath')
+                add_v.operation = 'ADD'
+                add_v.inputs[1].default_value = uv0.y
+                links.new(div_v.outputs['Value'], add_v.inputs[0])
+                
+                # Combine XYZ
+                comb = nodes.new('ShaderNodeCombineXYZ')
+                links.new(add_u.outputs['Value'], comb.inputs[0])
+                links.new(add_v.outputs['Value'], comb.inputs[1])
+                
+                tex_image = nodes.new('ShaderNodeTexImage')
+                tex_image.image = source_image
+                tex_image.extension = 'CLIP' if props.clip_texture else 'EXTEND'
+                
+                emission = nodes.new('ShaderNodeEmission')
+                output = nodes.new('ShaderNodeOutputMaterial')
+                
+                bake_target = nodes.new('ShaderNodeTexImage')
+                bake_target.image = img
+                bake_target.select = True
+                nt.nodes.active = bake_target
+                
+                links.new(comb.outputs['Vector'], tex_image.inputs['Vector'])
+                links.new(tex_image.outputs['Color'], emission.inputs['Color'])
+                links.new(emission.outputs['Emission'], output.inputs['Surface'])
+                
+                # Assign temp material
+                if not obj.data.materials:
+                    obj.data.materials.append(mat)
+                else:
+                    for i in range(len(obj.material_slots)):
+                        obj.material_slots[i].material = mat
+                    
+            if not original_materials:
+                self.report({'ERROR'}, "No valid receivers to bake.")
+                return {'CANCELLED'}
+                
+            # 5. Bake
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = receivers[0]
+            for obj in receivers:
+                obj.select_set(True)
+            
+            # Switch to Cycles
+            orig_engine = context.scene.render.engine
+            orig_samples = context.scene.cycles.samples
+            
+            bake_settings = context.scene.render.bake
+            orig_margin = bake_settings.margin
+            orig_clear = bake_settings.use_clear
+            orig_s2a = bake_settings.use_selected_to_active
+            
+            context.scene.render.engine = 'CYCLES'
+            context.scene.cycles.samples = props.samples
+            bake_settings.margin = props.margin
+            bake_settings.use_clear = props.clear_image
+            bake_settings.use_selected_to_active = False
+            
+            bpy.ops.object.bake(type='EMIT', save_mode='INTERNAL')
+            
+            context.scene.render.engine = orig_engine
+            context.scene.cycles.samples = orig_samples
+            bake_settings.margin = orig_margin
+            bake_settings.use_clear = orig_clear
+            bake_settings.use_selected_to_active = orig_s2a
+            
+            self.report({'INFO'}, f"Baked to image '{props.output_name}'")
+            
+        finally:
+            # 6. Restore
+            bpy.ops.object.select_all(action='DESELECT')
+            try:
+                if orig_active:
+                    bpy.context.view_layer.objects.active = orig_active
+                for obj in orig_selected:
+                    obj.select_set(True)
+            except ReferenceError:
+                pass
+                
+            for obj, mats in original_materials.items():
+                for i, mat in enumerate(mats):
+                    if i < len(obj.material_slots):
+                        obj.material_slots[i].material = mat
+            for obj, uv in original_uvs.items():
+                if uv:
+                    uv.active_render = True
+            for mat in temp_materials:
+                bpy.data.materials.remove(mat)
+            
+            # Restore selection
+            for obj in receivers:
+                obj.select_set(True)
+            active.select_set(True)
+            bpy.context.view_layer.objects.active = active
+
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_DecalProjector_OpenImage(Operator):
+    bl_idname = "arantools.decal_proj_open_image"
+    bl_label = "Inspect Baked Decal"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        props = context.scene.arantools_decal_projector
+        img = bpy.data.images.get(props.output_name)
+        if not img:
+            self.report({'ERROR'}, f"Image '{props.output_name}' not found. Bake it first.")
+            return {'CANCELLED'}
+
+        for area in context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                area.spaces.active.image = img
+                return {'FINISHED'}
+        try:
+            bpy.ops.wm.window_new()
+            win = context.window_manager.windows[-1]
+            area = win.screen.areas[0]
+            area.type = 'IMAGE_EDITOR'
+            area.spaces.active.image = img
+            return {'FINISHED'}
+        except RuntimeError:
+            self.report({'WARNING'}, "Could not open new window.")
+            return {'CANCELLED'}
+
+
 # ============================================================================
 # Registration
 # ============================================================================
@@ -1935,6 +2303,11 @@ classes = [
     ARANTOOLS_OT_BakePreviewEnter,
     ARANTOOLS_OT_BakePreviewExit,
     ARANTOOLS_OT_BakePreviewBake,
+    ARANTOOLS_PG_DecalProjector,
+    ARANTOOLS_OT_DecalProjector_AddReceiver,
+    ARANTOOLS_OT_DecalProjector_RemoveReceiver,
+    ARANTOOLS_OT_DecalProjector,
+    ARANTOOLS_OT_DecalProjector_OpenImage,
 ]
 
 
@@ -1943,6 +2316,9 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.arantools_normal_bake = bpy.props.PointerProperty(
         type=ARANTOOLS_PG_NormalBake
+    )
+    bpy.types.Scene.arantools_decal_projector = bpy.props.PointerProperty(
+        type=ARANTOOLS_PG_DecalProjector
     )
 
 
@@ -1954,5 +2330,6 @@ def unregister():
         pass
     _MATCH_CACHE.clear()
     del bpy.types.Scene.arantools_normal_bake
+    del bpy.types.Scene.arantools_decal_projector
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

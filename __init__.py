@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aran Tools",
     "author": "Aran",
-    "version": (0, 2, 0),
+    "version": (0, 2, 7),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Aran Tools",
     "description": "A collection of rigging, weight, organization, animation, and naming tools.",
@@ -29,6 +29,9 @@ from . import tree_blend_geonode
 from . import tree_rings
 from . import tree_retopo
 from . import primitive_buildings
+import importlib as _importlib
+from . import feather_cards
+_importlib.reload(feather_cards)
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -51,19 +54,29 @@ class ARANTOOLS_OT_reload_addon(bpy.types.Operator):
         import addon_utils
 
         def do_reload():
-            # Force-reload every cached arantools module from disk first
+            addon_utils.disable("arantools", default_set=False)
+            # Reload submodules first, then the top-level package
             submod_names = sorted(
                 k for k in sys.modules
-                if k == 'arantools' or k.startswith('arantools.')
+                if k.startswith('arantools.')
             )
             for mod_name in submod_names:
                 try:
                     importlib.reload(sys.modules[mod_name])
                 except Exception as e:
                     print(f"[AranTools] reload warning – {mod_name}: {e}")
+            if 'arantools' in sys.modules:
+                try:
+                    importlib.reload(sys.modules['arantools'])
+                except Exception as e:
+                    print(f"[AranTools] reload warning – arantools: {e}")
 
-            addon_utils.disable("arantools", default_set=False)
             addon_utils.enable("arantools", default_set=False)
+            wm = getattr(bpy.context, "window_manager", None)
+            if wm is not None:
+                for win in wm.windows:
+                    for area in win.screen.areas:
+                        area.tag_redraw()
 
         bpy.app.timers.register(do_reload, first_interval=0.0)
         return {'FINISHED'}
@@ -109,9 +122,11 @@ _TOOL_REGISTRY = [
     ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
     ('anim_loop',      'Animation Loop Tools',   'Tools for looping animations', 'ANIMATION', 'FILE_REFRESH', '_draw_t_anim_loop', False),
+    ('decal_projector', 'Decal Projector',       'Project the active texture from an active plane onto selected meshes, and bake it into a new image.', 'BAKING', 'IMAGE_PLANE', '_draw_t_decal_projector', False),
     ('tree_rings',     'Wood Ring Spiral',       'Generate a randomizable growth-ring spiral between an inner and an outer shape. The spiral winds from inner to outer and never crosses the outer boundary, even when rings overlap. Great for wood-grain texture sources', 'EXTRAS', 'FORCE_VORTEX', '_draw_t_tree_rings', False),
     ('primitive_buildings', 'Primitive Buildings Tool', 'Takes selected meshes, duplicates, joins, Smart UV projects, rotates islands to align wood grain to longest 3D bounding box edge, and separates UVs into quadrants by material', 'EXTRAS', 'MESH_CUBE', '_draw_t_primitive_buildings', False),
     ('tree_retopo',    'Branch Retopo (Sweep)',  'Auto-retopologise an organic branch/tree sculpt into clean quad cylinders with cylinder UVs. Detect an editable centerline skeleton (finds the cylinders / branch splits), then generate surface-fitted rings with smooth junctions. SpeedTree-style clean cage; fine bark detail goes to the Normal Map Baker', 'EXTRAS', 'MESH_CYLINDER', '_draw_t_tree_retopo', False),
+    ('feather_cards',  'Feather Object Generator', 'Author feathers as an edge-only mesh with per-edge mesh selection & direction and per-vertex radius, tilt, and smoothing metadata — generated in pure Python without Geometry Nodes', 'HAIRCARDS', 'STRANDS', '_draw_t_feather_cards', False),
 ]
 
 # Only collapsible (non-small) tools need a BoolProperty
@@ -152,8 +167,9 @@ class ARANTOOLS_PT_main(Panel):
 
         # ── Active tab name ───────────────────────────────────────────────
         tab_info = {
-            'RIGGING':      ('Rigging',      'ARMATURE_DATA'),
-            'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
+            'RIGGING':      ('Rigging',              'ARMATURE_DATA'),
+            'WEIGHT':       ('Weight Tools',         'MOD_VERTEX_WEIGHT'),
+            'HAIRCARDS':    ('Haircards & Feathers', 'STRANDS'),
             'ORGANIZATION': ('Organization', 'OUTLINER'),
             'EXPORT':       ('Export',       'EXPORT'),
             'BAKING':       ('Baking',       'NORMALS_FACE'),
@@ -176,6 +192,7 @@ class ARANTOOLS_PT_main(Panel):
         tabs = [
             ('RIGGING',      'ARMATURE_DATA',     'COLORSET_11_VEC'),
             ('WEIGHT',       'MOD_VERTEX_WEIGHT', 'COLORSET_02_VEC'),
+            ('HAIRCARDS',    'STRANDS',           'COLORSET_01_VEC'),
             ('ORGANIZATION', 'OUTLINER',          'COLORSET_06_VEC'),
             ('EXPORT',       'EXPORT',            'COLORSET_12_VEC'),
             ('BAKING',       'NORMALS_FACE',      'COLORSET_09_VEC'),
@@ -219,7 +236,7 @@ class ARANTOOLS_PT_main(Panel):
             row.label(text=label, icon=icon)
             return box, True
         prop_name = f'arantools_open_{tool_id}'
-        expanded = getattr(scene, prop_name)
+        expanded = getattr(scene, prop_name, True)
         row.prop(scene, prop_name, text="",
                  icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
         row.label(text=label, icon=icon)
@@ -228,8 +245,9 @@ class ARANTOOLS_PT_main(Panel):
     def _draw_search(self, layout, scene, context, search):
         """Draw filtered tools from all tabs matching the search term."""
         tab_labels = {
-            'RIGGING':      ('Rigging',      'ARMATURE_DATA'),
-            'WEIGHT':       ('Weight Tools', 'MOD_VERTEX_WEIGHT'),
+            'RIGGING':      ('Rigging',              'ARMATURE_DATA'),
+            'WEIGHT':       ('Weight Tools',         'MOD_VERTEX_WEIGHT'),
+            'HAIRCARDS':    ('Haircards & Feathers', 'STRANDS'),
             'ORGANIZATION': ('Organization', 'OUTLINER'),
             'EXPORT':       ('Export',       'EXPORT'),
             'BAKING':       ('Baking',       'NORMALS_FACE'),
@@ -1021,6 +1039,50 @@ class ARANTOOLS_PT_main(Panel):
             box.label(text=f"{len(no_mat)} mesh(es) skipped (no material).",
                       icon='ERROR')
         return bool(buckets)
+
+    def _draw_t_decal_projector(self, layout, context):
+        props = context.scene.arantools_decal_projector
+        col = layout.column(align=True)
+        col.prop(props, "projector_obj")
+        col.separator()
+        
+        col.label(text="Receivers:")
+        for i, item in enumerate(props.receivers):
+            row = col.row(align=True)
+            row.prop(item, "obj", text="")
+            op = row.operator("arantools.decal_proj_remove", text="", icon='X')
+            op.index = i
+            
+        col.operator("arantools.decal_proj_add", text="Add Receiver", icon='PLUS')
+        col.separator()
+        col.prop(props, "source_image")
+        col.separator()
+        first_obj = next((item.obj for item in props.receivers if item.obj and item.obj.type == 'MESH'), None)
+        if first_obj:
+            col.prop_search(props, "target_uv_name", first_obj.data, "uv_layers", text="Target UV Map")
+        else:
+            col.prop(props, "target_uv_name", text="Target UV Map (Need Receiver)")
+        col.prop(props, "resolution")
+        col.prop(props, "output_name")
+        col.prop(props, "clip_texture")
+        
+        box = col.box()
+        row = box.row(align=True)
+        row.prop(props, "show_advanced", text="",
+                 icon='TRIA_DOWN' if props.show_advanced else 'TRIA_RIGHT', emboss=False)
+        row.label(text="Advanced", icon='PREFERENCES')
+        if props.show_advanced:
+            box.prop(props, "samples")
+            box.prop(props, "margin")
+            box.prop(props, "clear_image")
+            
+        col.separator()
+        row = col.row()
+        row.scale_y = 1.5
+        row.operator("arantools.decal_projector", text="Bake Decal", icon='RENDER_STILL')
+        
+        col.separator()
+        col.operator("arantools.decal_proj_open_image", icon='IMAGE_DATA')
 
     def _draw_t_multires_setup(self, layout, context):
         from . import baking as _baking
@@ -2173,6 +2235,9 @@ class ARANTOOLS_PT_main(Panel):
         col.operator("arantools.fix_loop", icon='FILE_REFRESH', text="Fix Loop")
         col.operator("arantools.apply_cycles", icon='FILE_REFRESH', text="Add Cycles Before Noise")
 
+    def _draw_t_feather_cards(self, layout, context):
+        feather_cards.draw_feather_cards_ui(layout, context)
+
 
 # ============================================================================
 # Registration
@@ -2291,20 +2356,22 @@ def register():
     tree_rings.register()
     primitive_buildings.register()
     tree_retopo.register()
+    feather_cards.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
-            ('RIGGING',       "", "Rigging",       'ARMATURE_DATA',      0),
-            ('WEIGHT',        "", "Weight Tools",   'MOD_VERTEX_WEIGHT',  1),
-            ('ORGANIZATION',  "", "Organization",   'OUTLINER',           2),
-            ('EXPORT',        "", "Export",         'EXPORT',             3),
-            ('BAKING',        "", "Baking",         'NORMALS_FACE',       4),
-            ('NAMING',        "", "Naming",         'SORTALPHA',          5),
-            ('ANIMATION',     "", "Animation",      'ANIM',               6),
-            ('TREE',          "", "Tree Tools",     'OUTLINER_OB_CURVES', 7),
-            ('EXTRAS',        "", "Extras",         'PLUS',               8),
+            ('RIGGING',       "", "Rigging",              'ARMATURE_DATA',      0),
+            ('WEIGHT',        "", "Weight Tools",         'MOD_VERTEX_WEIGHT',  1),
+            ('HAIRCARDS',     "", "Haircards & Feathers", 'STRANDS',            9),
+            ('ORGANIZATION',  "", "Organization",         'OUTLINER',           2),
+            ('EXPORT',        "", "Export",               'EXPORT',             3),
+            ('BAKING',        "", "Baking",               'NORMALS_FACE',       4),
+            ('NAMING',        "", "Naming",               'SORTALPHA',          5),
+            ('ANIMATION',     "", "Animation",            'ANIM',               6),
+            ('TREE',          "", "Tree Tools",           'OUTLINER_OB_CURVES', 7),
+            ('EXTRAS',        "", "Extras",               'PLUS',               8),
         ],
-        default='RIGGING',
+        default='HAIRCARDS',
     )
 
     bpy.types.Scene.arantools_search = bpy.props.StringProperty(
@@ -2318,7 +2385,7 @@ def register():
     for tool_id in _OPEN_TOOL_IDS:
         setattr(bpy.types.Scene, f'arantools_open_{tool_id}',
                 bpy.props.BoolProperty(
-                    default=False,
+                    default=(tool_id == 'feather_cards'),
                     description=_tool_desc_map[tool_id],
                 ))
 
@@ -2331,27 +2398,39 @@ def register():
 
 def unregister():
     _uninstall_topbar_button()
-    del bpy.types.Scene.arantools_active_tab
-    del bpy.types.Scene.arantools_search
-    for tool_id in _OPEN_TOOL_IDS:
-        delattr(bpy.types.Scene, f'arantools_open_{tool_id}')
+    for attr in ('arantools_active_tab', 'arantools_search', *[f'arantools_open_{tid}' for tid in _OPEN_TOOL_IDS]):
+        if hasattr(bpy.types.Scene, attr):
+            try:
+                delattr(bpy.types.Scene, attr)
+            except Exception:
+                pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-    tree_retopo.unregister()
-    primitive_buildings.unregister()
-    tree_rings.unregister()
-    tree_blend_geonode.unregister()
-    tree_tubes_geonode.unregister()
-    tree_uv_geonode.unregister()
-    tree_branch.unregister()
-    tree_inspect.unregister()
-    modifier_sync.unregister()
-    island_flatten.unregister()
-    baking.unregister()
-    export.unregister()
-    organization.unregister()
-    weight_tools.unregister()
-    naming.unregister()
-    animation.unregister()
-    auto_weights.unregister()
-    rigging.unregister()
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
+    for _mod in (
+        feather_cards,
+        tree_retopo,
+        primitive_buildings,
+        tree_rings,
+        tree_blend_geonode,
+        tree_tubes_geonode,
+        tree_uv_geonode,
+        tree_branch,
+        tree_inspect,
+        modifier_sync,
+        island_flatten,
+        baking,
+        export,
+        organization,
+        weight_tools,
+        naming,
+        animation,
+        auto_weights,
+        rigging,
+    ):
+        try:
+            _mod.unregister()
+        except Exception:
+            pass
