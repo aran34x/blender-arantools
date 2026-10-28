@@ -39,7 +39,7 @@ from bpy.props import (
     PointerProperty,
     StringProperty,
 )
-from bpy.types import Operator, PropertyGroup
+from bpy.types import Operator, PropertyGroup, UIList
 from mathutils import Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.geometry import intersect_point_line
@@ -1709,8 +1709,89 @@ def get_admitted_mesh_slots(guide_obj):
     return [(idx, s.mesh_obj) for idx, s in enumerate(fprops.mesh_slots) if s.mesh_obj is not None]
 
 
+def _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True):
+    """Return list of edge indices selected on `guide_obj.data` in Object Mode (expanded to full chains if `whole_chain`).
+    If not in Feather Mode and no edges are selected, returns all edge indices.
+    """
+    if guide_obj is None or guide_obj.data is None:
+        return []
+    mesh = guide_obj.data
+    n_edges = len(mesh.edges)
+    if n_edges == 0:
+        return []
+
+    sel_e = {i for i, e in enumerate(mesh.edges) if e.select}
+    sel_v = {i for i, v in enumerate(mesh.vertices) if v.select}
+
+    if not sel_e and not sel_v:
+        if getattr(guide_obj.arantools_feather, "in_feather_mode", False):
+            # Check cached selected_chains if available
+            obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+            sel_chains = obj_cache.get("selected_chains") if obj_cache else None
+            if sel_chains:
+                chains = _get_guide_chains_fast(guide_obj)
+                out_e = []
+                for ci in sel_chains:
+                    if 0 <= ci < len(chains):
+                        out_e.extend(chains[ci][1])
+                return out_e
+            return []
+        return list(range(n_edges))
+
+    if not whole_chain:
+        return sorted(sel_e)
+
+    chains = _get_guide_chains_fast(guide_obj)
+    out_edges = []
+    for v_chain, e_chain in chains:
+        if any(ei in sel_e for ei in e_chain) or any(vi in sel_v for vi in v_chain):
+            out_edges.extend(e_chain)
+    return out_edges
+
+
+def _get_selected_chain_indices(guide_obj):
+    """Return sorted list of currently selected feather chain indices `c_idx` in either Edit Mode or Object Mode."""
+    if guide_obj is None or guide_obj.data is None:
+        return []
+    chains = _get_guide_chains_fast(guide_obj)
+    if not chains:
+        return []
+
+    if guide_obj.mode == 'EDIT':
+        try:
+            bm = bmesh.from_edit_mesh(guide_obj.data)
+            sel_v = {v.index for v in bm.verts if v.select and not v.hide}
+            sel_e = {e.index for e in bm.edges if e.select and not e.hide}
+            if not sel_v and not sel_e:
+                # Fall back to unhidden chains if isolated
+                unhidden_e = {e.index for e in bm.edges if not e.hide}
+                if 0 < len(unhidden_e) < len(bm.edges):
+                    sel_e = unhidden_e
+            return [
+                ci for ci, (vc, ec) in enumerate(chains)
+                if any(vi in sel_v for vi in vc) or any(ei in sel_e for ei in ec)
+            ]
+        except Exception:
+            return []
+    else:
+        obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+        if obj_cache is not None and obj_cache.get("selected_chains") is not None:
+            valid = [ci for ci in sorted(obj_cache["selected_chains"]) if 0 <= ci < len(chains)]
+            if valid:
+                return valid
+        mesh = guide_obj.data
+        sel_e = {i for i, e in enumerate(mesh.edges) if e.select}
+        sel_v = {i for i, v in enumerate(mesh.vertices) if v.select}
+        if not sel_e and not sel_v:
+            return []
+        return [
+            ci for ci, (vc, ec) in enumerate(chains)
+            if any(vi in sel_v for vi in vc) or any(ei in sel_e for ei in ec)
+        ]
+
+
 def get_selected_feathers_mask_state(guide_obj):
-    """Return `(union_mask, inter_mask, n_selected_edges)` for the currently selected feather(s)."""
+    """Return `(and_mask, or_mask, n_selected_edges)` for the currently selected feather(s)."""
     if guide_obj is None:
         return 0, 0, 0
     if guide_obj.mode == 'EDIT':
@@ -1722,33 +1803,33 @@ def get_selected_feathers_mask_state(guide_obj):
             return 0, 0, 0
         mask_layer = bm.edges.layers.int.get("feather_mesh_mask")
         slot_layer = bm.edges.layers.int.get("feather_mesh_slot")
-        union_m = 0
-        inter_m = None
+        or_m = 0
+        and_m = None
         for e in chain_edges:
             mval = int(e[mask_layer]) if mask_layer is not None else -1
             if mval < 0:
                 sval = int(e[slot_layer]) if slot_layer is not None else 0
                 mval = 1 << max(0, min(29, sval))
-            union_m |= mval
-            inter_m = mval if inter_m is None else (inter_m & mval)
-        return union_m, (inter_m if inter_m is not None else 0), len(chain_edges)
+            or_m |= mval
+            and_m = mval if and_m is None else (and_m & mval)
+        return (and_m if and_m is not None else 0), or_m, len(chain_edges)
     else:
         mesh = guide_obj.data
         mask_attr = mesh.attributes.get("feather_mesh_mask")
         slot_attr = mesh.attributes.get("feather_mesh_slot")
-        n_edges = len(mesh.edges)
-        if n_edges == 0:
+        target_e_indices = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+        if not target_e_indices:
             return 0, 0, 0
-        union_m = 0
-        inter_m = None
-        for i in range(n_edges):
+        or_m = 0
+        and_m = None
+        for i in target_e_indices:
             mval = int(mask_attr.data[i].value) if mask_attr else -1
             if mval < 0:
                 sval = int(slot_attr.data[i].value) if slot_attr else 0
                 mval = 1 << max(0, min(29, sval))
-            union_m |= mval
-            inter_m = mval if inter_m is None else (inter_m & mval)
-        return union_m, (inter_m if inter_m is not None else 0), n_edges
+            or_m |= mval
+            and_m = mval if and_m is None else (and_m & mval)
+        return (and_m if and_m is not None else 0), or_m, len(target_e_indices)
 
 
 def _get_selected_bm_elements(bm, whole_chain=True):
@@ -1784,62 +1865,99 @@ def _get_selected_bm_elements(bm, whole_chain=True):
 
 
 def sync_ui_from_selection(context):
-    """Read metadata from the active/selected vertex & edge in Edit Mode into Scene UI properties."""
+    """Read metadata from the active/selected vertex & edge (in Edit Mode or Feather Mode) into Scene UI properties."""
     global _IS_SYNCING_UI
     if _IS_SYNCING_UI:
         return
     guide_obj = get_feather_guide_from_context(context)
-    if guide_obj is None or guide_obj.mode != 'EDIT':
+    if guide_obj is None:
         return
     ui = getattr(context.scene, "arantools_feather_ui", None)
     if ui is None:
         return
 
-    bm = bmesh.from_edit_mesh(guide_obj.data)
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-
-    act_v = bm.select_history.active if isinstance(bm.select_history.active, bmesh.types.BMVert) else None
-    if act_v is None:
-        act_v = next((v for v in bm.verts if v.select), None)
-
-    act_e = bm.select_history.active if isinstance(bm.select_history.active, bmesh.types.BMEdge) else None
-    if act_e is None:
-        act_e = next((e for e in bm.edges if e.select), None)
-    if act_e is None and act_v is not None and act_v.link_edges:
-        act_e = act_v.link_edges[0]
-
     _IS_SYNCING_UI = True
     try:
-        if act_v is not None:
-            for name, _ in POINT_FLOAT_ATTRS:
-                layer = bm.verts.layers.float.get(name)
-                if layer is not None:
-                    setattr(ui, f"vert_{name}", float(act_v[layer]))
+        if guide_obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(guide_obj.data)
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
 
-        if act_e is not None:
-            slot_layer = bm.edges.layers.int.get("feather_mesh_slot")
-            if slot_layer is not None:
-                s_idx = int(act_e[slot_layer])
-                slots = guide_obj.arantools_feather.mesh_slots
-                if 0 <= s_idx < len(slots):
-                    ui.edge_mesh_obj = slots[s_idx].mesh_obj
+            act_v = bm.select_history.active if isinstance(bm.select_history.active, bmesh.types.BMVert) else None
+            if act_v is None:
+                act_v = next((v for v in bm.verts if v.select and not v.hide), None)
 
-            rev_layer = bm.edges.layers.bool.get("feather_reverse")
-            if rev_layer is not None:
-                ui.edge_reverse = bool(act_e[rev_layer])
+            act_e = bm.select_history.active if isinstance(bm.select_history.active, bmesh.types.BMEdge) else None
+            if act_e is None:
+                act_e = next((e for e in bm.edges if e.select and not e.hide), None)
+            if act_e is None and act_v is not None and act_v.link_edges:
+                act_e = act_v.link_edges[0]
 
-            subdiv_layer = bm.edges.layers.int.get("feather_subdiv")
-            if subdiv_layer is not None:
-                ui.edge_subdiv = int(act_e[subdiv_layer])
+            if act_v is not None:
+                for name, _ in POINT_FLOAT_ATTRS:
+                    layer = bm.verts.layers.float.get(name)
+                    if layer is not None:
+                        setattr(ui, f"vert_{name}", float(act_v[layer]))
 
-            st_layer = bm.edges.layers.int.get("feather_smooth_tilt")
-            if st_layer is not None:
-                ui.edge_smooth_tilt = int(act_e[st_layer])
+            if act_e is not None:
+                slot_layer = bm.edges.layers.int.get("feather_mesh_slot")
+                if slot_layer is not None:
+                    s_idx = int(act_e[slot_layer])
+                    slots = guide_obj.arantools_feather.mesh_slots
+                    if 0 <= s_idx < len(slots):
+                        ui.edge_mesh_obj = slots[s_idx].mesh_obj
+                        guide_obj.arantools_feather.active_slot_index = s_idx
 
-            ss_layer = bm.edges.layers.int.get("feather_smooth_spline")
-            if ss_layer is not None:
-                ui.edge_smooth_spline = int(act_e[ss_layer])
+                rev_layer = bm.edges.layers.bool.get("feather_reverse")
+                if rev_layer is not None:
+                    ui.edge_reverse = bool(act_e[rev_layer])
+
+                subdiv_layer = bm.edges.layers.int.get("feather_subdiv")
+                if subdiv_layer is not None:
+                    ui.edge_subdiv = int(act_e[subdiv_layer])
+
+                st_layer = bm.edges.layers.int.get("feather_smooth_tilt")
+                if st_layer is not None:
+                    ui.edge_smooth_tilt = int(act_e[st_layer])
+
+                ss_layer = bm.edges.layers.int.get("feather_smooth_spline")
+                if ss_layer is not None:
+                    ui.edge_smooth_spline = int(act_e[ss_layer])
+        else:
+            # Object Mode / Feathers Submode: read from the first selected edge & vertex
+            mesh = guide_obj.data
+            sel_e_indices = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+            if sel_e_indices:
+                ei = sel_e_indices[0]
+                vi = mesh.edges[ei].vertices[0]
+                for name, _ in POINT_FLOAT_ATTRS:
+                    attr = mesh.attributes.get(name)
+                    if attr is not None and vi < len(attr.data):
+                        setattr(ui, f"vert_{name}", float(attr.data[vi].value))
+
+                slot_attr = mesh.attributes.get("feather_mesh_slot")
+                if slot_attr is not None and ei < len(slot_attr.data):
+                    s_idx = int(slot_attr.data[ei].value)
+                    slots = guide_obj.arantools_feather.mesh_slots
+                    if 0 <= s_idx < len(slots):
+                        ui.edge_mesh_obj = slots[s_idx].mesh_obj
+                        guide_obj.arantools_feather.active_slot_index = s_idx
+
+                rev_attr = mesh.attributes.get("feather_reverse")
+                if rev_attr is not None and ei < len(rev_attr.data):
+                    ui.edge_reverse = bool(rev_attr.data[ei].value)
+
+                subdiv_attr = mesh.attributes.get("feather_subdiv")
+                if subdiv_attr is not None and ei < len(subdiv_attr.data):
+                    ui.edge_subdiv = int(subdiv_attr.data[ei].value)
+
+                st_attr = mesh.attributes.get("feather_smooth_tilt")
+                if st_attr is not None and ei < len(st_attr.data):
+                    ui.edge_smooth_tilt = int(st_attr.data[ei].value)
+
+                ss_attr = mesh.attributes.get("feather_smooth_spline")
+                if ss_attr is not None and ei < len(ss_attr.data):
+                    ui.edge_smooth_spline = int(ss_attr.data[ei].value)
     finally:
         _IS_SYNCING_UI = False
 
@@ -1872,8 +1990,16 @@ def _make_vert_attr_updater(attr_name):
             ensure_feather_guide_attributes(guide_obj.data)
             attr = guide_obj.data.attributes.get(attr_name)
             if attr is not None:
-                for d in attr.data:
-                    d.value = val
+                sel_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+                target_v = set()
+                for ei in sel_e:
+                    e = guide_obj.data.edges[ei]
+                    target_v.add(e.vertices[0])
+                    target_v.add(e.vertices[1])
+                if not target_v and not guide_obj.arantools_feather.in_feather_mode:
+                    target_v = set(range(len(guide_obj.data.vertices)))
+                for vi in target_v:
+                    attr.data[vi].value = val
         if guide_obj.arantools_feather.auto_update:
             regenerate_feather_object(guide_obj)
     return _update
@@ -1898,14 +2024,15 @@ def _update_edge_mesh_obj(self, context):
         bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
     else:
         ensure_feather_guide_attributes(guide_obj.data)
+        target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
         attr = guide_obj.data.attributes.get("feather_mesh_slot")
         if attr is not None:
-            for d in attr.data:
-                d.value = slot_idx
+            for ei in target_e:
+                attr.data[ei].value = slot_idx
         mask_attr = guide_obj.data.attributes.get("feather_mesh_mask")
         if mask_attr is not None:
-            for d in mask_attr.data:
-                d.value = mask_bit
+            for ei in target_e:
+                mask_attr.data[ei].value = mask_bit
     if guide_obj.arantools_feather.auto_update:
         regenerate_feather_object(guide_obj)
 
@@ -1937,10 +2064,11 @@ def _update_edge_reverse(self, context):
         bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
     else:
         ensure_feather_guide_attributes(guide_obj.data)
+        target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
         attr = guide_obj.data.attributes.get("feather_reverse")
         if attr is not None:
-            for d in attr.data:
-                d.value = val
+            for ei in target_e:
+                attr.data[ei].value = val
     if guide_obj.arantools_feather.auto_update:
         regenerate_feather_object(guide_obj)
 
@@ -1964,10 +2092,11 @@ def _make_edge_int_updater(prop_name, attr_name):
             bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
         else:
             ensure_feather_guide_attributes(guide_obj.data)
+            target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
             attr = guide_obj.data.attributes.get(attr_name)
             if attr is not None:
-                for d in attr.data:
-                    d.value = val
+                for ei in target_e:
+                    attr.data[ei].value = val
         if guide_obj.arantools_feather.auto_update:
             regenerate_feather_object(guide_obj)
     return _update
@@ -2002,6 +2131,30 @@ def _update_feather_view_mode(self, context):
         regenerate_feather_object(guide_obj, force_full_rebuild=True)
 
 
+def _on_active_slot_index_changed(self, context):
+    """When clicking a row in the Admitted Feather Meshes UIList in Feather Mode, assign it as ONLY mesh."""
+    if _IS_GENERATING or _IS_SYNCING_UI:
+        return
+    guide_obj = _resolve_owner_guide_obj(self, context)
+    if guide_obj is None:
+        return
+    fprops = guide_obj.arantools_feather
+    if not fprops.in_feather_mode:
+        return
+    idx = int(fprops.active_slot_index)
+    if 0 <= idx < len(fprops.mesh_slots):
+        mobj = fprops.mesh_slots[idx].mesh_obj
+        if mobj is not None:
+            try:
+                bpy.ops.arantools.feather_assign_slot(
+                    slot_index=idx,
+                    mesh_name=mobj.name,
+                    extend_random=False,
+                )
+            except Exception:
+                pass
+
+
 # ============================================================================
 # Property Groups
 # ============================================================================
@@ -2033,6 +2186,11 @@ class ARANTOOLS_PG_FeatherObject(PropertyGroup):
         name="Is Generated Feather Mesh",
         default=False,
     )
+    in_feather_mode: BoolProperty(
+        name="Feather Mode",
+        description="Whether this Feather Object is currently in the interactive Feather Mode",
+        default=False,
+    )
     guide_object: PointerProperty(
         name="Feather Guide Object",
         type=bpy.types.Object,
@@ -2044,6 +2202,11 @@ class ARANTOOLS_PG_FeatherObject(PropertyGroup):
     mesh_slots: CollectionProperty(
         name="Feather Mesh Slots",
         type=ARANTOOLS_PG_FeatherMeshSlot,
+    )
+    active_slot_index: IntProperty(
+        name="Active Feather Mesh",
+        default=0,
+        update=_on_active_slot_index_changed,
     )
     admitted_collection: PointerProperty(
         name="Admitted Feathers Collection",
@@ -2078,14 +2241,14 @@ class ARANTOOLS_PG_FeatherObject(PropertyGroup):
         update=_update_feather_view_mode,
     )
     feather_submode: EnumProperty(
-        name="Feather Mode",
-        description="Feather Mode selection sub-mode (1 = Vertex, 2 = Spline Edge, 3 = Feather Select & Isolate)",
+        name="Feather Sub-Mode",
+        description="Switch between Feathers (whole-feather selection), Splines, and Vertices",
         items=[
-            ('VERTEX', "1: Vertex", "Edit individual vertices of the visible feather(s)"),
-            ('EDGE', "2: Spline", "Edit spline edges of the visible feather(s)"),
-            ('FEATHER_SELECT', "3: Feather Select", "Hover-preview full 3D feather with fill & click to isolate its vertices"),
+            ('FEATHER_SELECT', "Feathers", "Select whole feathers in the viewport and edit feather-level settings (Shortcut: 3)"),
+            ('EDGE', "Splines", "Edit feather guide splines (Shortcut: 2)"),
+            ('VERTEX', "Vertices", "Edit individual feather vertices, radius, tilt & smoothing (Shortcut: 1)"),
         ],
-        default='VERTEX',
+        default='FEATHER_SELECT',
     )
     deform_axis: EnumProperty(
         name="Deform Axis",
@@ -2141,6 +2304,15 @@ class ARANTOOLS_PG_FeatherObject(PropertyGroup):
 
 
 class ARANTOOLS_PG_FeatherSceneUI(PropertyGroup):
+    panel_tab: EnumProperty(
+        name="Panel Tab",
+        description="Switch between active mode Controls and Advanced settings",
+        items=[
+            ('CONTROLS', "Controls", "Primary controls for the current Feather Mode"),
+            ('ADVANCED', "Advanced", "Surface projection, baking, mirror, and scene setup settings"),
+        ],
+        default='CONTROLS',
+    )
     apply_whole_chain: BoolProperty(
         name="Apply to Whole Feather",
         description="Apply vertex/edge edits to the entire connected feather chain",
@@ -2946,41 +3118,8 @@ class ARANTOOLS_OT_feather_bake_parameters(Operator):
         return {'FINISHED'}
 
 
-class ARANTOOLS_OT_feather_toggle_edit(Operator):
-    bl_idname = "arantools.feather_toggle_edit"
-    bl_label = "Toggle Feather Mode"
-    bl_description = "Enter or exit Feather Mode (1 = Vertex, 2 = Spline Edge, 3 = Feather Select & Isolate)"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX
-        guide_obj = get_feather_guide_from_context(context)
-        if guide_obj is None:
-            self.report({'WARNING'}, "Select a Feather Object first.")
-            return {'CANCELLED'}
-
-        if context.active_object == guide_obj and guide_obj.mode == 'EDIT':
-            _FEATHER_PICK_MODAL_ACTIVE = False
-            _HOVERED_CHAIN_INDEX = -1
-            bpy.ops.object.mode_set(mode='OBJECT')
-        else:
-            if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            guide_obj.hide_set(False)
-            guide_obj.select_set(True)
-            context.view_layer.objects.active = guide_obj
-            bpy.ops.object.mode_set(mode='EDIT')
-            submode = guide_obj.arantools_feather.feather_submode
-            if submode == 'EDGE':
-                context.tool_settings.mesh_select_mode = (False, True, False)
-            else:
-                context.tool_settings.mesh_select_mode = (True, False, False)
-            sync_ui_from_selection(context)
-            if submode == 'FEATHER_SELECT':
-                bpy.ops.arantools.feather_select_modal('INVOKE_DEFAULT')
-
-        return {'FINISHED'}
+_HOVERED_MIRRORED = False
+_VIEW3D_HEADER_DRAW_KEY = "_arantools_feather_view3d_header"
 
 
 def _get_guide_chains_fast(guide_obj):
@@ -2992,85 +3131,118 @@ def _get_guide_chains_fast(guide_obj):
     return _trace_chains_from_edges(len(verts_co), edges_v)
 
 
-def _unhide_all_feathers(guide_obj, select_all=False):
-    """Unhide all vertices and edges in Edit Mode on `guide_obj`."""
-    if guide_obj is None or guide_obj.mode != 'EDIT':
+def _set_selected_chain_indices(guide_obj, chain_indices, isolate_in_edit=True, context=None):
+    """Unified selection setter across Object Mode (`Feathers` sub-mode) and Edit Mode (`Vertices`/`Splines`)."""
+    if guide_obj is None or guide_obj.data is None:
         return
-    bm = bmesh.from_edit_mesh(guide_obj.data)
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    for v in bm.verts:
-        v.hide = False
+    chains = _get_guide_chains_fast(guide_obj)
+    valid_chains = [ci for ci in sorted(set(chain_indices)) if 0 <= ci < len(chains)]
+
+    obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+    if obj_cache is not None:
+        obj_cache["selected_chains"] = set(valid_chains)
+        obj_cache["gpu_batches"] = None
+
+    keep_v = set()
+    keep_e = set()
+    first_v_idx = None
+    first_e_idx = None
+    for c_idx in valid_chains:
+        v_chain, e_chain = chains[c_idx]
+        keep_v.update(v_chain)
+        keep_e.update(e_chain)
+        if first_v_idx is None and v_chain:
+            first_v_idx = v_chain[0]
+        if first_e_idx is None and e_chain:
+            first_e_idx = e_chain[0]
+
+    should_isolate = isolate_in_edit and (0 < len(valid_chains) < len(chains))
+
+    if guide_obj.mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(guide_obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+
+        for v in bm.verts:
+            if v.index in keep_v:
+                v.hide = False
+                v.select = True
+            else:
+                v.select = False
+                v.hide = should_isolate
+
+        for e in bm.edges:
+            if e.index in keep_e:
+                e.hide = False
+                e.select = True
+            else:
+                e.select = False
+                e.hide = should_isolate
+
+        bm.select_history.clear()
+        if first_v_idx is not None and 0 <= first_v_idx < len(bm.verts):
+            bm.select_history.add(bm.verts[first_v_idx])
+        elif first_e_idx is not None and 0 <= first_e_idx < len(bm.edges):
+            bm.select_history.add(bm.edges[first_e_idx])
+
+        bm.select_flush_mode()
+        bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
+    else:
+        # In Object Mode (`Feathers` sub-mode): update Mesh vertex/edge select flags without Edit Mode flicker!
+        mesh = guide_obj.data
+        for v in mesh.vertices:
+            v.hide = False
+            v.select = (v.index in keep_v)
+        for e in mesh.edges:
+            e.hide = False
+            e.select = (e.index in keep_e)
+
+    if context is not None:
+        sync_ui_from_selection(context)
+
+
+def _unhide_all_feathers(guide_obj, select_all=False):
+    """Unhide all vertices and edges in Edit Mode or Object Mode on `guide_obj`."""
+    if guide_obj is None or guide_obj.data is None:
+        return
+    if guide_obj.mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(guide_obj.data)
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        for v in bm.verts:
+            v.hide = False
+            if select_all:
+                v.select = True
+        for e in bm.edges:
+            e.hide = False
+            if select_all:
+                e.select = True
+        bm.select_flush_mode()
+        bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
+    else:
+        mesh = guide_obj.data
+        for v in mesh.vertices:
+            v.hide = False
+            if select_all:
+                v.select = True
+        for e in mesh.edges:
+            e.hide = False
+            if select_all:
+                e.select = True
         if select_all:
-            v.select = True
-    for e in bm.edges:
-        e.hide = False
-        if select_all:
-            e.select = True
-    bm.select_flush_mode()
-    bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
+            chains = _get_guide_chains_fast(guide_obj)
+            obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+            if obj_cache is not None:
+                obj_cache["selected_chains"] = set(range(len(chains)))
+
     obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
     if obj_cache is not None:
         obj_cache["gpu_batches"] = None
 
 
 def _isolate_feather_chains(guide_obj, chain_indices, context=None):
-    """Show ONLY the vertices & edges of `chain_indices` in Edit Mode and hide all other feathers."""
-    if guide_obj is None or guide_obj.mode != 'EDIT':
-        return
-    chains = _get_guide_chains_fast(guide_obj)
-    if not chains:
-        return
-
-    keep_v = set()
-    keep_e = set()
-    first_v_idx = None
-    first_e_idx = None
-    for c_idx in chain_indices:
-        if 0 <= c_idx < len(chains):
-            v_chain, e_chain = chains[c_idx]
-            keep_v.update(v_chain)
-            keep_e.update(e_chain)
-            if first_v_idx is None and v_chain:
-                first_v_idx = v_chain[0]
-            if first_e_idx is None and e_chain:
-                first_e_idx = e_chain[0]
-
-    bm = bmesh.from_edit_mesh(guide_obj.data)
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-
-    for v in bm.verts:
-        if v.index in keep_v:
-            v.hide = False
-            v.select = True
-        else:
-            v.select = False
-            v.hide = True
-
-    for e in bm.edges:
-        if e.index in keep_e:
-            e.hide = False
-            e.select = True
-        else:
-            e.select = False
-            e.hide = True
-
-    bm.select_history.clear()
-    if first_v_idx is not None and 0 <= first_v_idx < len(bm.verts):
-        bm.select_history.add(bm.verts[first_v_idx])
-    elif first_e_idx is not None and 0 <= first_e_idx < len(bm.edges):
-        bm.select_history.add(bm.edges[first_e_idx])
-
-    bm.select_flush_mode()
-    bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
-
-    obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
-    if obj_cache is not None:
-        obj_cache["gpu_batches"] = None
-
-    if context is not None:
-        sync_ui_from_selection(context)
+    """Select `chain_indices` and isolate them when in Edit Mode."""
+    _set_selected_chain_indices(guide_obj, chain_indices, isolate_in_edit=True, context=context)
 
 
 def _find_view3d_region_at_mouse(context, event):
@@ -3086,7 +3258,7 @@ def _find_view3d_region_at_mouse(context, event):
         rv3d = getattr(space, "region_3d", None)
         if rv3d is None:
             continue
-        # Ignore clicks inside N-panel (UI) or Toolbar (TOOLS) regions so UI buttons still work!
+        # Ignore clicks inside N-panel (UI), Header, or Toolbar (TOOLS) regions so UI buttons always work!
         for reg in area.regions:
             if reg.type in {'UI', 'TOOLS', 'HEADER', 'TOOL_HEADER', 'HUD'}:
                 if reg.x <= mx <= reg.x + reg.width and reg.y <= my <= reg.y + reg.height:
@@ -3098,12 +3270,23 @@ def _find_view3d_region_at_mouse(context, event):
     return None, None, None, None
 
 
+def _get_mirror_reflection_matrix(fprops):
+    """Return the 4x4 world-space reflection matrix across `mirror_object` local X plane."""
+    m_obj = fprops.mirror_object or bpy.data.objects.get("Plane.086")
+    if m_obj is not None:
+        mw_m = m_obj.matrix_world
+        return mw_m @ Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0)) @ mw_m.inverted_safe()
+    return Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0))
+
+
 def _pick_feather_chain_at_mouse(context, event, guide_obj):
-    """Find the feather chain index `c_idx` under the mouse cursor using 3D raycast on the
-    generated feather card mesh first, falling back to 2D screen-space spline distance.
+    """Find the feather chain index `c_idx` under the mouse cursor using depth-occluded 3D raycast
+    against the generated feather cards (`out_obj` + mirrored half), with depth-culled spline fallback.
     """
+    global _HOVERED_MIRRORED
     _, region, rv3d, coord = _find_view3d_region_at_mouse(context, event)
     if region is None or rv3d is None or guide_obj is None:
+        _HOVERED_MIRRORED = False
         return -1
 
     fprops = guide_obj.arantools_feather
@@ -3115,43 +3298,65 @@ def _pick_feather_chain_at_mouse(context, event, guide_obj):
 
     chain_ranges = obj_cache.get("chain_ranges", []) if obj_cache else []
 
+    ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+    ray_dir = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord).normalized()
+
+    # 0. Depth Occlusion Check against the Bird Body (`surface_object`) so back-facing feathers
+    #    on the far side of the bird are NEVER picked through the body!
+    max_depth = 1e30
+    surf_obj = fprops.surface_object or bpy.data.objects.get("BODY_Retopo")
+    if surf_obj is not None and surf_obj.type == 'MESH' and surf_obj.data is not None and len(surf_obj.data.polygons) > 0:
+        s_inv = surf_obj.matrix_world.inverted_safe()
+        s_orig = s_inv @ ray_origin
+        s_dir = (s_inv.to_3x3() @ ray_dir).normalized()
+        s_hit, s_loc, _, _ = surf_obj.ray_cast(s_orig, s_dir)
+        if s_hit:
+            body_dist = (surf_obj.matrix_world @ s_loc - ray_origin).length
+            # Allow a small tolerance (0.04m) for feather roots slightly embedded in the body skin
+            max_depth = body_dist + 0.04
+
     # 1. 3D Raycast against the generated 3D feather cards (`out_obj`)
     if out_obj is not None and out_obj.data is not None and len(out_obj.data.polygons) > 0 and chain_ranges:
-        ray_origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
-        ray_dir = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
-        mw_inv = out_obj.matrix_world.inverted_safe()
+        mw_out = out_obj.matrix_world
+        mw_inv = mw_out.inverted_safe()
         loc_orig = mw_inv @ ray_origin
         loc_dir = (mw_inv.to_3x3() @ ray_dir).normalized()
 
-        best_dist = 1e30
+        best_dist = max_depth
         best_poly = -1
+        best_is_mirrored = False
 
         hit, loc, _, poly_idx = out_obj.ray_cast(loc_orig, loc_dir)
         if hit and poly_idx >= 0:
-            best_dist = (out_obj.matrix_world @ loc - ray_origin).length
-            best_poly = poly_idx
+            d = (mw_out @ loc - ray_origin).length
+            if d <= best_dist:
+                best_dist = d
+                best_poly = poly_idx
+                best_is_mirrored = False
 
-        # Also test mirrored X ray if mirror is enabled so clicking mirrored feathers works too
+        # Test mirrored half using the exact reflection matrix of `mirror_object`
         if fprops.use_mirror:
-            m_obj = fprops.mirror_object or bpy.data.objects.get("Plane.086")
-            mx = m_obj.matrix_world.translation.x if m_obj else 0.0
-            mir_orig = Vector((2.0 * mx - ray_origin.x, ray_origin.y, ray_origin.z))
-            mir_dir = Vector((-ray_dir.x, ray_dir.y, ray_dir.z)).normalized()
-            m_loc_orig = mw_inv @ mir_orig
-            m_loc_dir = (mw_inv.to_3x3() @ mir_dir).normalized()
+            refl_mat = _get_mirror_reflection_matrix(fprops)
+            mir_orig_w = refl_mat @ ray_origin
+            mir_dir_w = (refl_mat.to_3x3() @ ray_dir).normalized()
+            m_loc_orig = mw_inv @ mir_orig_w
+            m_loc_dir = (mw_inv.to_3x3() @ mir_dir_w).normalized()
             m_hit, m_loc, _, m_poly_idx = out_obj.ray_cast(m_loc_orig, m_loc_dir)
             if m_hit and m_poly_idx >= 0:
-                d = (out_obj.matrix_world @ m_loc - mir_orig).length
+                w_hit_mirrored = refl_mat @ (mw_out @ m_loc)
+                d = (w_hit_mirrored - ray_origin).length
                 if d < best_dist:
                     best_dist = d
                     best_poly = m_poly_idx
+                    best_is_mirrored = True
 
         if best_poly >= 0:
             for c_idx, _, _, p_start, p_end, _, _ in chain_ranges:
                 if p_start <= best_poly < p_end:
+                    _HOVERED_MIRRORED = best_is_mirrored
                     return c_idx
 
-    # 2. Fallback: 2D screen-space distance to guide spline segments (within 32 px)
+    # 2. Fallback: Depth-culled 2D screen-space distance to guide spline segments (within 22 px)
     if obj_cache and obj_cache.get("overlay_data"):
         verts_co, chains, _ = obj_cache["overlay_data"]
     else:
@@ -3159,47 +3364,95 @@ def _pick_feather_chain_at_mouse(context, event, guide_obj):
         chains = _trace_chains_from_edges(len(verts_co), edges_v)
 
     mw = guide_obj.matrix_world
-    m_pt = Vector(( float(coord[0]), float(coord[1]) ))
+    refl_mat = _get_mirror_reflection_matrix(fprops) if fprops.use_mirror else None
+    m_pt = Vector((float(coord[0]), float(coord[1])))
     best_c_idx = -1
-    best_px_dist = 32.0
+    best_px_dist = 22.0
+    best_mir = False
 
     for c_idx, (v_chain, _) in enumerate(chains):
-        pts_2d = []
-        for vi in v_chain:
-            p2 = view3d_utils.location_3d_to_region_2d(region, rv3d, mw @ Vector(verts_co[vi]))
-            if p2 is not None:
-                pts_2d.append(Vector((float(p2.x), float(p2.y))))
-        for i in range(len(pts_2d) - 1):
-            a, b = pts_2d[i], pts_2d[i + 1]
-            ab = b - a
-            ab_len_sq = ab.length_squared
-            if ab_len_sq < 1e-6:
-                d = (m_pt - a).length
-            else:
-                t = max(0.0, min(1.0, (m_pt - a).dot(ab) / ab_len_sq))
-                d = (m_pt - (a + ab * t)).length
-            if d < best_px_dist:
-                best_px_dist = d
-                best_c_idx = c_idx
+        for is_mir in ((False, True) if refl_mat is not None else (False,)):
+            pts_2d = []
+            for vi in v_chain:
+                w_pt = mw @ Vector(verts_co[vi])
+                if is_mir:
+                    w_pt = refl_mat @ w_pt
+                # Reject spline points occluded behind the bird body!
+                if (w_pt - ray_origin).length > max_depth + 0.05:
+                    continue
+                p2 = view3d_utils.location_3d_to_region_2d(region, rv3d, w_pt)
+                if p2 is not None:
+                    pts_2d.append(Vector((float(p2.x), float(p2.y))))
+            for i in range(len(pts_2d) - 1):
+                a, b = pts_2d[i], pts_2d[i + 1]
+                ab = b - a
+                ab_len_sq = ab.length_squared
+                if ab_len_sq < 1e-6:
+                    d = (m_pt - a).length
+                else:
+                    t = max(0.0, min(1.0, (m_pt - a).dot(ab) / ab_len_sq))
+                    d = (m_pt - (a + ab * t)).length
+                if d < best_px_dist:
+                    best_px_dist = d
+                    best_c_idx = c_idx
+                    best_mir = is_mir
 
+    _HOVERED_MIRRORED = best_mir
     return best_c_idx
+
+
+class ARANTOOLS_OT_feather_toggle_edit(Operator):
+    bl_idname = "arantools.feather_toggle_edit"
+    bl_label = "Toggle Feather Mode"
+    bl_description = "Enter or exit the dedicated Feather Mode (Feathers / Splines / Vertices)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            self.report({'WARNING'}, "Select a Feather Object first.")
+            return {'CANCELLED'}
+
+        fprops = guide_obj.arantools_feather
+        out_obj = fprops.output_object
+
+        if fprops.in_feather_mode:
+            # Exit Feather Mode -> return to standard Object Mode
+            fprops.in_feather_mode = False
+            _FEATHER_PICK_MODAL_ACTIVE = False
+            _HOVERED_CHAIN_INDEX = -1
+            if guide_obj.mode == 'EDIT':
+                _unhide_all_feathers(guide_obj, select_all=False)
+                bpy.ops.object.mode_set(mode='OBJECT')
+            if out_obj is not None:
+                out_obj.hide_select = False
+            for area in context.screen.areas if context.screen else []:
+                area.tag_redraw()
+        else:
+            # Enter Feather Mode -> default to Feathers (`FEATHER_SELECT`) submode if not already set
+            fprops.in_feather_mode = True
+            target_sub = fprops.feather_submode or 'FEATHER_SELECT'
+            bpy.ops.arantools.feather_set_submode('INVOKE_DEFAULT', submode=target_sub)
+
+        return {'FINISHED'}
 
 
 class ARANTOOLS_OT_feather_show_all(Operator):
     bl_idname = "arantools.feather_show_all"
     bl_label = "Show All Feathers"
-    bl_description = "Unhide all feathers in Edit Mode so every feather spline is visible (Shortcut: Alt+H)"
+    bl_description = "Unhide all feathers so every feather spline is visible (Shortcut: Alt+H)"
     bl_options = {'REGISTER', 'UNDO'}
 
     def invoke(self, context, event):
         guide_obj = get_feather_guide_from_context(context)
-        if guide_obj is None or guide_obj.mode != 'EDIT':
+        if guide_obj is None or not guide_obj.arantools_feather.in_feather_mode:
             return {'PASS_THROUGH'}
         return self.execute(context)
 
     def execute(self, context):
         guide_obj = get_feather_guide_from_context(context)
-        if guide_obj is None or guide_obj.mode != 'EDIT':
+        if guide_obj is None:
             return {'CANCELLED'}
         _unhide_all_feathers(guide_obj, select_all=False)
         for area in context.screen.areas if context.screen else []:
@@ -3210,12 +3463,15 @@ class ARANTOOLS_OT_feather_show_all(Operator):
 
 class ARANTOOLS_OT_feather_select_modal(Operator):
     bl_idname = "arantools.feather_select_modal"
-    bl_label = "Feather Select Mode (Interactive Hover & Isolate)"
+    bl_label = "Feather Mode — Feathers Picker"
     bl_description = (
-        "Hover over any feather to preview its full 3D fill, then Left-Click to isolate "
-        "its vertices in Edit Mode (Shift+Click to select multiple feathers)"
+        "Hover over any feather in the 3D Viewport to highlight it, Left-Click to select "
+        "(Shift+Click to select multiple feathers, 1 = Edit Vertices, 2 = Edit Splines)"
     )
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        return self.invoke(context, None)
 
     def invoke(self, context, event):
         global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX, _HOVERED_GUIDE_NAME
@@ -3223,33 +3479,36 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
         if guide_obj is None:
             return {'CANCELLED'}
 
-        if guide_obj.mode != 'EDIT':
-            if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            guide_obj.hide_set(False)
-            guide_obj.select_set(True)
-            context.view_layer.objects.active = guide_obj
-            bpy.ops.object.mode_set(mode='EDIT')
+        fprops = guide_obj.arantools_feather
+        fprops.in_feather_mode = True
+        fprops.feather_submode = 'FEATHER_SELECT'
 
-        guide_obj.arantools_feather.feather_submode = 'FEATHER_SELECT'
+        # Preserve selection from Edit Mode before exiting Edit Mode to eliminate Edit Mode cage flicker!
+        cur_sel = _get_selected_chain_indices(guide_obj)
+        if guide_obj.mode == 'EDIT':
+            _unhide_all_feathers(guide_obj, select_all=False)
+            bpy.ops.object.mode_set(mode='OBJECT')
 
-        # Preserve any currently selected feather chains in Edit Mode when entering Feather Select
-        bm = bmesh.from_edit_mesh(guide_obj.data)
-        chains = _get_guide_chains_fast(guide_obj)
-        sel_v = {v.index for v in bm.verts if v.select and not v.hide}
-        sel_e = {e.index for e in bm.edges if e.select and not e.hide}
-        initial_chains = {
-            ci
-            for ci, (vc, ec) in enumerate(chains)
-            if any(vi in sel_v for vi in vc) or any(ei in sel_e for ei in ec)
-        }
-        self._isolated_chains = initial_chains if len(initial_chains) < len(chains) else set()
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Lock selection on output mesh while in Feather Mode so clicking feathers never selects `out_obj`
+        out_obj = fprops.output_object
+        if out_obj is not None:
+            out_obj.hide_select = True
+            out_obj.select_set(False)
+
+        guide_obj.hide_set(False)
+        guide_obj.select_set(True)
+        context.view_layer.objects.active = guide_obj
+
+        if cur_sel:
+            _set_selected_chain_indices(guide_obj, cur_sel, isolate_in_edit=False, context=context)
 
         _HOVERED_GUIDE_NAME = guide_obj.name
         _HOVERED_CHAIN_INDEX = -1
 
-        if _FEATHER_PICK_MODAL_ACTIVE:
+        if _FEATHER_PICK_MODAL_ACTIVE or bpy.app.background or event is None or context.window is None:
             return {'FINISHED'}
 
         _FEATHER_PICK_MODAL_ACTIVE = True
@@ -3262,8 +3521,6 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
         global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX
         _FEATHER_PICK_MODAL_ACTIVE = False
         _HOVERED_CHAIN_INDEX = -1
-        if context.window:
-            context.window.cursor_modal_restore()
         for area in context.screen.areas if context.screen else []:
             area.tag_redraw()
 
@@ -3273,19 +3530,13 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
         if (
             not _FEATHER_PICK_MODAL_ACTIVE
             or guide_obj is None
-            or guide_obj.mode != 'EDIT'
+            or not guide_obj.arantools_feather.in_feather_mode
             or guide_obj.arantools_feather.feather_submode != 'FEATHER_SELECT'
         ):
             self._finish(context)
             return {'PASS_THROUGH'}
 
-        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
-            guide_obj.arantools_feather.feather_submode = 'VERTEX'
-            context.tool_settings.mesh_select_mode = (True, False, False)
-            self._finish(context)
-            return {'FINISHED'}
-
-        # Check if the mouse is inside the 3D Viewport WINDOW region (and not over N-panel/Toolbar)
+        # Keyboard shortcuts inside Feathers Mode (only when cursor is in 3D Viewport)
         v_area, v_reg, _, _ = _find_view3d_region_at_mouse(context, event)
         if v_reg is None:
             if _HOVERED_CHAIN_INDEX != -1:
@@ -3294,6 +3545,30 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
             return {'PASS_THROUGH'}
+
+        if event.type == 'ESC' and event.value == 'PRESS':
+            bpy.ops.arantools.feather_toggle_edit()
+            self._finish(context)
+            return {'FINISHED'}
+
+        if event.type == 'ONE' and event.value == 'PRESS' and not event.ctrl and not event.alt:
+            self._finish(context)
+            bpy.ops.arantools.feather_set_submode('INVOKE_DEFAULT', submode='VERTEX')
+            return {'FINISHED'}
+
+        if event.type == 'TWO' and event.value == 'PRESS' and not event.ctrl and not event.alt:
+            self._finish(context)
+            bpy.ops.arantools.feather_set_submode('INVOKE_DEFAULT', submode='EDGE')
+            return {'FINISHED'}
+
+        if event.type in {'X', 'DEL'} and event.value == 'PRESS' and not event.ctrl:
+            bpy.ops.arantools.feather_delete_selected()
+            return {'RUNNING_MODAL'}
+
+        if event.type == 'A' and event.value == 'PRESS' and not event.ctrl:
+            act = 'DESELECT' if event.alt else 'SELECT'
+            bpy.ops.arantools.feather_select_all(action=act)
+            return {'RUNNING_MODAL'}
 
         if event.type == 'MOUSEMOVE':
             c_idx = _pick_feather_chain_at_mouse(context, event, guide_obj)
@@ -3305,45 +3580,46 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
                         area.tag_redraw()
             return {'PASS_THROUGH'}
 
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and not event.alt:
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and not event.alt and not event.ctrl:
             c_idx = _pick_feather_chain_at_mouse(context, event, guide_obj)
+            cur_sel = set(_get_selected_chain_indices(guide_obj))
             if c_idx >= 0:
                 if event.shift:
-                    if c_idx in self._isolated_chains and len(self._isolated_chains) > 1:
-                        self._isolated_chains.remove(c_idx)
+                    if c_idx in cur_sel:
+                        cur_sel.remove(c_idx)
                     else:
-                        self._isolated_chains.add(c_idx)
+                        cur_sel.add(c_idx)
                 else:
-                    self._isolated_chains = {c_idx}
-
-                target_set = self._isolated_chains or {c_idx}
-                _isolate_feather_chains(guide_obj, sorted(target_set), context=context)
-                for area in context.screen.areas if context.screen else []:
-                    area.tag_redraw()
-                return {'RUNNING_MODAL'}
+                    cur_sel = {c_idx}
+                _set_selected_chain_indices(guide_obj, sorted(cur_sel), isolate_in_edit=False, context=context)
+            else:
+                if not event.shift and cur_sel:
+                    _set_selected_chain_indices(guide_obj, [], isolate_in_edit=False, context=context)
+            for area in context.screen.areas if context.screen else []:
+                area.tag_redraw()
+            return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
 
 
 class ARANTOOLS_OT_feather_set_submode(Operator):
     bl_idname = "arantools.feather_set_submode"
-    bl_label = "Set Feather Mode (1: Vertex, 2: Spline, 3: Feather Select)"
-    bl_description = "Switch Feather Mode sub-modes using 1 (Vertex), 2 (Spline Edge), 3 (Feather Select & Isolate)"
+    bl_label = "Set Feather Mode"
+    bl_description = "Switch Feather Mode between Feathers (3), Splines (2), and Vertices (1)"
     bl_options = {'REGISTER', 'UNDO'}
 
     submode: EnumProperty(
         items=[
-            ('VERTEX', "1: Vertex", "Edit vertices of visible feather(s)"),
-            ('EDGE', "2: Spline", "Edit spline edges of visible feather(s)"),
-            ('FEATHER_SELECT', "3: Feather Select", "Hover-preview full feather & click to isolate"),
+            ('FEATHER_SELECT', "Feathers", "Select whole feathers in the viewport and edit feather-level settings"),
+            ('EDGE', "Splines", "Edit feather guide splines"),
+            ('VERTEX', "Vertices", "Edit individual feather vertices, radius, tilt & smoothing"),
         ],
-        default='VERTEX',
+        default='FEATHER_SELECT',
     )
 
     def invoke(self, context, event):
         guide_obj = get_feather_guide_from_context(context)
         if guide_obj is None:
-            # Pass through to standard Blender 1/2/3 when not on a Feather Object!
             return {'PASS_THROUGH'}
         return self.execute(context)
 
@@ -3353,28 +3629,42 @@ class ARANTOOLS_OT_feather_set_submode(Operator):
         if guide_obj is None:
             return {'CANCELLED'}
 
-        if guide_obj.mode != 'EDIT':
-            if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            guide_obj.hide_set(False)
-            guide_obj.select_set(True)
-            context.view_layer.objects.active = guide_obj
-            bpy.ops.object.mode_set(mode='EDIT')
+        fprops = guide_obj.arantools_feather
+        fprops.in_feather_mode = True
+        out_obj = fprops.output_object
+        if out_obj is not None:
+            out_obj.hide_select = True
 
-        guide_obj.arantools_feather.feather_submode = self.submode
+        # Capture current selected feather chains before switching mode
+        cur_sel_chains = _get_selected_chain_indices(guide_obj)
+        fprops.feather_submode = self.submode
 
-        if self.submode == 'VERTEX':
-            _FEATHER_PICK_MODAL_ACTIVE = False
-            _HOVERED_CHAIN_INDEX = -1
-            context.tool_settings.mesh_select_mode = (True, False, False)
-        elif self.submode == 'EDGE':
-            _FEATHER_PICK_MODAL_ACTIVE = False
-            _HOVERED_CHAIN_INDEX = -1
-            context.tool_settings.mesh_select_mode = (False, True, False)
-        elif self.submode == 'FEATHER_SELECT':
-            context.tool_settings.mesh_select_mode = (True, True, False)
+        if self.submode == 'FEATHER_SELECT':
+            # Feathers mode runs in Object Mode with our custom 3D raycast picker -> ZERO Edit Mode flicker!
             bpy.ops.arantools.feather_select_modal('INVOKE_DEFAULT')
+        else:
+            # Vertices or Splines mode -> enter Edit Mode and isolate the selected feather(s)!
+            _FEATHER_PICK_MODAL_ACTIVE = False
+            _HOVERED_CHAIN_INDEX = -1
+
+            if guide_obj.mode != 'EDIT':
+                if context.mode != 'OBJECT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                bpy.ops.object.select_all(action='DESELECT')
+                guide_obj.hide_set(False)
+                guide_obj.select_set(True)
+                context.view_layer.objects.active = guide_obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+            if self.submode == 'VERTEX':
+                context.tool_settings.mesh_select_mode = (True, False, False)
+            else:
+                context.tool_settings.mesh_select_mode = (False, True, False)
+
+            if cur_sel_chains:
+                _set_selected_chain_indices(guide_obj, cur_sel_chains, isolate_in_edit=True, context=context)
+            else:
+                sync_ui_from_selection(context)
 
         for area in context.screen.areas if context.screen else []:
             area.tag_redraw()
@@ -3383,8 +3673,8 @@ class ARANTOOLS_OT_feather_set_submode(Operator):
 
 class ARANTOOLS_OT_feather_toggle_select_mode(Operator):
     bl_idname = "arantools.feather_toggle_select_mode"
-    bl_label = "Toggle Feather Select / Vertex Edit (4 or Alt+F)"
-    bl_description = "Quickly switch between Feather Select Mode (3) and Feather Vertex Edit Mode (1)"
+    bl_label = "Switch Feathers / Vertices"
+    bl_description = "Quickly toggle between Feathers selection mode and Vertices editing mode (Shortcut: 4 or Alt+F)"
     bl_options = {'REGISTER', 'UNDO'}
 
     def invoke(self, context, event):
@@ -3397,9 +3687,220 @@ class ARANTOOLS_OT_feather_toggle_select_mode(Operator):
         guide_obj = get_feather_guide_from_context(context)
         if guide_obj is None:
             return {'CANCELLED'}
-        cur = guide_obj.arantools_feather.feather_submode
-        target = 'VERTEX' if (cur == 'FEATHER_SELECT' and guide_obj.mode == 'EDIT') else 'FEATHER_SELECT'
+        fprops = guide_obj.arantools_feather
+        target = 'VERTEX' if (fprops.in_feather_mode and fprops.feather_submode == 'FEATHER_SELECT') else 'FEATHER_SELECT'
         return bpy.ops.arantools.feather_set_submode('INVOKE_DEFAULT', submode=target)
+
+
+class ARANTOOLS_OT_feather_select_all(Operator):
+    bl_idname = "arantools.feather_select_all"
+    bl_label = "Select / Deselect All Feathers"
+    bl_description = "Select all feathers or clear selection in Feather Mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: EnumProperty(
+        items=[
+            ('SELECT', "Select All", "Select all feathers"),
+            ('DESELECT', "Deselect All", "Clear feather selection"),
+        ],
+        default='SELECT',
+    )
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            return {'CANCELLED'}
+        chains = _get_guide_chains_fast(guide_obj)
+        if self.action == 'SELECT':
+            _unhide_all_feathers(guide_obj, select_all=True)
+            _set_selected_chain_indices(guide_obj, list(range(len(chains))), isolate_in_edit=False, context=context)
+        else:
+            _set_selected_chain_indices(guide_obj, [], isolate_in_edit=False, context=context)
+        for area in context.screen.areas if context.screen else []:
+            area.tag_redraw()
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_duplicate_selected(Operator):
+    bl_idname = "arantools.feather_duplicate_selected"
+    bl_label = "Duplicate Feather(s)"
+    bl_description = "Duplicate the selected feather(s) with all their attributes and select the new copy"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            return {'CANCELLED'}
+        sel_chains = _get_selected_chain_indices(guide_obj)
+        if not sel_chains:
+            self.report({'WARNING'}, "Select at least one feather first.")
+            return {'CANCELLED'}
+
+        chains = _get_guide_chains_fast(guide_obj)
+        was_edit = (guide_obj.mode == 'EDIT')
+        bm = bmesh.from_edit_mesh(guide_obj.data) if was_edit else bmesh.new()
+        if not was_edit:
+            bm.from_mesh(guide_obj.data)
+
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        orig_verts = list(bm.verts)
+        orig_edges = list(bm.edges)
+
+        v_layers = [bm.verts.layers.float.get(n) for n, _ in POINT_FLOAT_ATTRS]
+        e_int_layers = [bm.edges.layers.int.get(n) for n, _ in EDGE_INT_ATTRS]
+        rev_layer = bm.edges.layers.bool.get("feather_reverse")
+        up_layer = bm.edges.layers.float_vector.get("feather_up")
+
+        for v in orig_verts:
+            v.select = False
+        for e in orig_edges:
+            e.select = False
+
+        offset = Vector((0.02, 0.02, 0.02))
+        for c_idx in sel_chains:
+            if not (0 <= c_idx < len(chains)):
+                continue
+            v_chain, e_chain = chains[c_idx]
+            v_map = {}
+            for vi in v_chain:
+                src_v = orig_verts[vi]
+                nv = bm.verts.new(src_v.co + offset)
+                for lyr in v_layers:
+                    if lyr is not None:
+                        nv[lyr] = src_v[lyr]
+                nv.select = True
+                v_map[vi] = nv
+            for ei in e_chain:
+                src_e = orig_edges[ei]
+                v0 = v_map.get(src_e.verts[0].index)
+                v1 = v_map.get(src_e.verts[1].index)
+                if v0 and v1 and v0 != v1:
+                    ne = bm.edges.new((v0, v1))
+                    for lyr in e_int_layers:
+                        if lyr is not None:
+                            ne[lyr] = src_e[lyr]
+                    if rev_layer is not None:
+                        ne[rev_layer] = src_e[rev_layer]
+                    if up_layer is not None:
+                        ne[up_layer] = src_e[up_layer]
+                    ne.select = True
+
+        bm.select_flush_mode()
+        if was_edit:
+            bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=True)
+        else:
+            bm.to_mesh(guide_obj.data)
+            bm.free()
+            guide_obj.data.update()
+
+        invalidate_feather_cache(guide_obj)
+        regenerate_feather_object(guide_obj, force_full_rebuild=True)
+        new_chains = _get_guide_chains_fast(guide_obj)
+        new_indices = list(range(len(new_chains) - len(sel_chains), len(new_chains)))
+        _set_selected_chain_indices(guide_obj, new_indices, isolate_in_edit=was_edit, context=context)
+        self.report({'INFO'}, f"Duplicated {len(sel_chains)} feather(s).")
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_delete_selected(Operator):
+    bl_idname = "arantools.feather_delete_selected"
+    bl_label = "Delete Feather(s)"
+    bl_description = "Delete the currently selected feather(s)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            return {'CANCELLED'}
+        sel_chains = _get_selected_chain_indices(guide_obj)
+        if not sel_chains:
+            self.report({'WARNING'}, "Select at least one feather to delete.")
+            return {'CANCELLED'}
+
+        chains = _get_guide_chains_fast(guide_obj)
+        del_v_indices = set()
+        for c_idx in sel_chains:
+            if 0 <= c_idx < len(chains):
+                del_v_indices.update(chains[c_idx][0])
+
+        was_edit = (guide_obj.mode == 'EDIT')
+        bm = bmesh.from_edit_mesh(guide_obj.data) if was_edit else bmesh.new()
+        if not was_edit:
+            bm.from_mesh(guide_obj.data)
+
+        bm.verts.ensure_lookup_table()
+        verts_to_remove = [bm.verts[vi] for vi in del_v_indices if vi < len(bm.verts)]
+        for v in verts_to_remove:
+            bm.verts.remove(v)
+
+        if was_edit:
+            bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=True)
+        else:
+            bm.to_mesh(guide_obj.data)
+            bm.free()
+            guide_obj.data.update()
+
+        invalidate_feather_cache(guide_obj)
+        regenerate_feather_object(guide_obj, force_full_rebuild=True)
+        _set_selected_chain_indices(guide_obj, [], isolate_in_edit=False, context=context)
+        for area in context.screen.areas if context.screen else []:
+            area.tag_redraw()
+        self.report({'INFO'}, f"Deleted {len(sel_chains)} feather(s).")
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_taper_radius(Operator):
+    bl_idname = "arantools.feather_taper_radius"
+    bl_label = "Taper Root -> Tip"
+    bl_description = "Smoothly taper the vertex radius along the selected feather(s) from Root to Tip"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tip_factor: FloatProperty(name="Tip Scale", default=0.55, min=0.05, max=2.0)
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            return {'CANCELLED'}
+        chains = _get_guide_chains_fast(guide_obj)
+        sel_chains = _get_selected_chain_indices(guide_obj) or list(range(len(chains)))
+
+        was_edit = (guide_obj.mode == 'EDIT')
+        bm = bmesh.from_edit_mesh(guide_obj.data) if was_edit else bmesh.new()
+        if not was_edit:
+            bm.from_mesh(guide_obj.data)
+
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        rad_layer = bm.verts.layers.float.get("radius") or bm.verts.layers.float.new("radius")
+        rev_layer = bm.edges.layers.bool.get("feather_reverse")
+
+        for c_idx in sel_chains:
+            if not (0 <= c_idx < len(chains)):
+                continue
+            v_chain, e_chain = chains[c_idx]
+            if len(v_chain) < 2:
+                continue
+            is_rev = any(bool(bm.edges[ei][rev_layer]) for ei in e_chain) if rev_layer else False
+            ordered_v = list(reversed(v_chain)) if is_rev else list(v_chain)
+            base_rad = float(bm.verts[ordered_v[0]][rad_layer])
+            if base_rad <= 0.01:
+                base_rad = 1.5
+            n_v = len(ordered_v)
+            for idx, vi in enumerate(ordered_v):
+                t = idx / float(n_v - 1)
+                bm.verts[vi][rad_layer] = base_rad * ((1.0 - t) + t * self.tip_factor)
+
+        if was_edit:
+            bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
+        else:
+            bm.to_mesh(guide_obj.data)
+            bm.free()
+            guide_obj.data.update()
+
+        sync_ui_from_selection(context)
+        regenerate_feather_object(guide_obj)
+        return {'FINISHED'}
 
 
 class ARANTOOLS_OT_feather_regenerate(Operator):
@@ -3423,8 +3924,8 @@ class ARANTOOLS_OT_feather_flip_direction(Operator):
     bl_idname = "arantools.feather_flip_direction"
     bl_label = "Flip Direction"
     bl_description = (
-        "Flip the Root-to-Tip direction of the selected feather chain(s) in Edit Mode "
-        "(or all feather chains in Object Mode), visually reversing the feather along its spline"
+        "Flip the Root-to-Tip direction of the selected feather(s), "
+        "visually reversing the feather along its spline"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3440,7 +3941,9 @@ class ARANTOOLS_OT_feather_flip_direction(Operator):
                 layer = bm.edges.layers.bool.new("feather_reverse")
             _, target_edges = _get_selected_bm_elements(bm, whole_chain=True)
             if not target_edges:
-                self.report({'WARNING'}, "Select at least one vertex or edge of a feather.")
+                target_edges = [e for e in bm.edges if not e.hide]
+            if not target_edges:
+                self.report({'WARNING'}, "Select at least one feather first.")
                 return {'CANCELLED'}
             for e in target_edges:
                 e[layer] = not bool(e[layer])
@@ -3448,10 +3951,15 @@ class ARANTOOLS_OT_feather_flip_direction(Operator):
             sync_ui_from_selection(context)
         else:
             ensure_feather_guide_attributes(guide_obj.data)
+            target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+            if not target_e:
+                self.report({'WARNING'}, "Select a feather in the viewport first.")
+                return {'CANCELLED'}
             attr = guide_obj.data.attributes.get("feather_reverse")
             if attr is not None:
-                for d in attr.data:
-                    d.value = not bool(d.value)
+                for ei in target_e:
+                    attr.data[ei].value = not bool(attr.data[ei].value)
+            sync_ui_from_selection(context)
 
         regenerate_feather_object(guide_obj)
         return {'FINISHED'}
@@ -3477,10 +3985,6 @@ class ARANTOOLS_OT_feather_flip_keep_look(Operator):
         axis = int(fprops.deform_axis)
         ax0, ax1, ax2 = axis, (axis + 1) % 3, (axis + 2) % 3
 
-        # 1. Invert each unique base mesh in mesh_slots:
-        #    Negate ax0 (along spline, e.g. Y -> -Y) and ax2 (binormal, e.g. X -> -X),
-        #    keep ax1 (normal, e.g. Z -> +Z). Since (-1)*(-1)*(+1) = +1, this is a pure
-        #    180° rigid rotation around ax1 (Z), preserving face winding & normals!
         inverted_meshes = set()
         for slot in fprops.mesh_slots:
             mobj = slot.mesh_obj
@@ -3495,7 +3999,6 @@ class ARANTOOLS_OT_feather_flip_keep_look(Operator):
                 co[ax2] = -co[ax2]
             mobj.data.update()
 
-        # 2. Flip direction (`feather_reverse`) on all edges & negate vertex `tilt` on guide_obj
         if guide_obj.mode == 'EDIT':
             bm = bmesh.from_edit_mesh(guide_obj.data)
             rev_layer = bm.edges.layers.bool.get("feather_reverse")
@@ -3522,8 +4025,8 @@ class ARANTOOLS_OT_feather_flip_keep_look(Operator):
             if tilt_attr is not None:
                 for d in tilt_attr.data:
                     d.value = -float(d.value)
+            sync_ui_from_selection(context)
 
-        # 3. Toggle `invert_curve_profile` so Float Curve.002 evaluates at (1 - t)
         fprops.invert_curve_profile = not bool(fprops.invert_curve_profile)
 
         invalidate_feather_cache(guide_obj)
@@ -3542,15 +4045,16 @@ class ARANTOOLS_OT_feather_flip_keep_look(Operator):
 class ARANTOOLS_OT_feather_assign_slot(Operator):
     bl_idname = "arantools.feather_assign_slot"
     bl_label = "Assign Feather Mesh"
-    bl_description = "Click: Select as ONLY feather mesh  |  Shift+Click: Toggle for random selection between checked meshes"
+    bl_description = "Click: Select as ONLY feather mesh  |  Shift+Click (or Checkbox): Toggle random selection between checked meshes"
     bl_options = {'REGISTER', 'UNDO'}
 
     slot_index: IntProperty(default=-1)
     mesh_name: StringProperty(default="")
     extend_random: BoolProperty(default=False)
+    force_random_toggle: BoolProperty(default=False)
 
     def invoke(self, context, event):
-        self.extend_random = bool(event.shift)
+        self.extend_random = bool(event.shift) or bool(self.force_random_toggle)
         return self.execute(context)
 
     def execute(self, context):
@@ -3568,6 +4072,7 @@ class ARANTOOLS_OT_feather_assign_slot(Operator):
         if not (0 <= slot_idx < len(slots)):
             return {'CANCELLED'}
 
+        use_random = bool(self.extend_random) or bool(self.force_random_toggle)
         bit = 1 << max(0, min(29, slot_idx))
 
         if guide_obj.mode == 'EDIT':
@@ -3579,11 +4084,10 @@ class ARANTOOLS_OT_feather_assign_slot(Operator):
             if not target_edges:
                 target_edges = [e for e in bm.edges if not e.hide]
             if not target_edges:
-                self.report({'WARNING'}, "Select a feather in Feather Mode first.")
+                self.report({'WARNING'}, "Select a feather in the viewport first.")
                 return {'CANCELLED'}
 
-            if self.extend_random:
-                # Shift+Click: toggle `bit` in the mask so the feather randomly chooses among checked meshes
+            if use_random:
                 all_have_bit = True
                 for e in target_edges:
                     cur_m = int(e[mask_layer])
@@ -3605,7 +4109,6 @@ class ARANTOOLS_OT_feather_assign_slot(Operator):
                                 e[slot_layer] = s_i
                                 break
             else:
-                # Normal Click: set as the ONLY selected mesh for the selected feather(s)
                 for e in target_edges:
                     e[slot_layer] = slot_idx
                     e[mask_layer] = bit
@@ -3614,19 +4117,37 @@ class ARANTOOLS_OT_feather_assign_slot(Operator):
             sync_ui_from_selection(context)
         else:
             ensure_feather_guide_attributes(guide_obj.data)
+            target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+            if not target_e:
+                self.report({'WARNING'}, "Select a feather in the viewport first.")
+                return {'CANCELLED'}
             slot_attr = guide_obj.data.attributes["feather_mesh_slot"]
             mask_attr = guide_obj.data.attributes["feather_mesh_mask"]
-            if self.extend_random:
-                all_have_bit = all((int(d.value) & bit) != 0 for d in mask_attr.data)
-                for idx_e, d in enumerate(mask_attr.data):
-                    cur_m = int(d.value)
+            if use_random:
+                all_have_bit = True
+                for ei in target_e:
+                    cur_m = int(mask_attr.data[ei].value)
+                    if cur_m < 0:
+                        cur_m = 1 << max(0, min(29, int(slot_attr.data[ei].value)))
+                    if not (cur_m & bit):
+                        all_have_bit = False
+                        break
+                for ei in target_e:
+                    cur_m = int(mask_attr.data[ei].value)
+                    if cur_m < 0:
+                        cur_m = 1 << max(0, min(29, int(slot_attr.data[ei].value)))
                     new_m = (cur_m & ~bit) if all_have_bit else (cur_m | bit)
-                    d.value = new_m
+                    mask_attr.data[ei].value = new_m
+                    if new_m > 0:
+                        for s_i in range(len(slots)):
+                            if new_m & (1 << s_i):
+                                slot_attr.data[ei].value = s_i
+                                break
             else:
-                for d in slot_attr.data:
-                    d.value = slot_idx
-                for d in mask_attr.data:
-                    d.value = bit
+                for ei in target_e:
+                    slot_attr.data[ei].value = slot_idx
+                    mask_attr.data[ei].value = bit
+            sync_ui_from_selection(context)
 
         regenerate_feather_object(guide_obj)
         return {'FINISHED'}
@@ -3683,15 +4204,19 @@ class ARANTOOLS_OT_feather_mesh_mask_all_none(Operator):
             sync_ui_from_selection(context)
         else:
             ensure_feather_guide_attributes(guide_obj.data)
+            target_e = _get_object_mode_selected_edge_indices(guide_obj, whole_chain=True)
+            slot_attr = guide_obj.data.attributes["feather_mesh_slot"]
             mask_attr = guide_obj.data.attributes["feather_mesh_mask"]
-            if self.mode == 'ALL':
-                for d in mask_attr.data:
-                    d.value = all_mask
-            elif self.mode == 'NONE':
-                for d in mask_attr.data:
-                    d.value = 0
-            elif self.mode == 'REROLL':
-                guide_obj.arantools_feather.random_seed += 1
+            seed_attr = guide_obj.data.attributes["feather_seed"]
+            for ei in target_e:
+                if self.mode == 'ALL':
+                    mask_attr.data[ei].value = all_mask
+                    slot_attr.data[ei].value = first_slot
+                elif self.mode == 'NONE':
+                    mask_attr.data[ei].value = 0
+                elif self.mode == 'REROLL':
+                    seed_attr.data[ei].value = int(seed_attr.data[ei].value) + 1
+            sync_ui_from_selection(context)
 
         regenerate_feather_object(guide_obj)
         return {'FINISHED'}
@@ -3712,6 +4237,84 @@ class ARANTOOLS_OT_feather_sync_admitted_collection(Operator):
         regenerate_feather_object(guide_obj, force_full_rebuild=True)
         self.report({'INFO'}, f"Synced {len(admitted)} admitted feather mesh(es) from collection.")
         return {'FINISHED'}
+
+
+class ARANTOOLS_UL_FeatherAdmittedList(UIList):
+    """Native Blender UIList for Admitted Feather Meshes.
+    - In Object Mode: displays the admitted feather card meshes in the collection with polygon counts.
+    - In Feather Mode: displays a checkbox on the left (to toggle random inclusion) + clickable mesh name
+      (Click = Select as ONLY mesh, Shift+Click = Toggle Random).
+    """
+    bl_idname = "ARANTOOLS_UL_FeatherAdmittedList"
+
+    def filter_items(self, context, data, propname):
+        slots = getattr(data, propname)
+        admitted_coll = getattr(data, "admitted_collection", None)
+        if admitted_coll is not None:
+            admitted_set = set(_get_collection_feather_meshes(admitted_coll, data))
+        else:
+            admitted_set = {s.mesh_obj for s in slots if s.mesh_obj is not None}
+
+        flt_flags = []
+        for s in slots:
+            if s.mesh_obj is not None and s.mesh_obj in admitted_set:
+                flt_flags.append(self.bitflag_filter_item)
+            else:
+                flt_flags.append(0)
+        return flt_flags, []
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        mobj = item.mesh_obj
+        if mobj is None:
+            layout.label(text="(Empty)", icon='MESH_DATA')
+            return
+
+        guide_obj = get_feather_guide_from_context(context)
+        in_feather_mode = bool(getattr(data, "in_feather_mode", False))
+
+        row = layout.row(align=True)
+        if in_feather_mode and guide_obj is not None:
+            and_mask, or_mask, num_sel = get_selected_feathers_mask_state(guide_obj)
+            bit = 1 << max(0, min(29, index))
+            is_all_checked = (and_mask & bit) != 0 and num_sel > 0
+            is_some_checked = (or_mask & bit) != 0 and num_sel > 0
+
+            if is_all_checked:
+                chk_icon = 'CHECKBOX_HLT'
+            elif is_some_checked:
+                chk_icon = 'DOT'
+            else:
+                chk_icon = 'CHECKBOX_DEHLT'
+
+            # 1. Left Checkbox: clicking directly toggles this mesh in/out of the Random Pool
+            op_chk = row.operator(
+                "arantools.feather_assign_slot",
+                text="",
+                icon=chk_icon,
+                emboss=False,
+            )
+            op_chk.slot_index = index
+            op_chk.mesh_name = mobj.name
+            op_chk.force_random_toggle = True
+
+            # 2. Mesh Name: Click = ONLY this mesh  |  Shift+Click = Toggle in Random Pool
+            op_sel = row.operator(
+                "arantools.feather_assign_slot",
+                text=mobj.name,
+                icon='OUTLINER_OB_MESH',
+                emboss=False,
+            )
+            op_sel.slot_index = index
+            op_sel.mesh_name = mobj.name
+            op_sel.force_random_toggle = False
+        else:
+            # Object Mode: clean list row with mesh name and face count
+            row.label(text=mobj.name, icon='OUTLINER_OB_MESH')
+            if mobj.data is not None:
+                sub = row.row(align=True)
+                sub.alignment = 'RIGHT'
+                sub.enabled = False
+                sub.label(text=f"{len(mobj.data.polygons)} faces")
 
 
 class ARANTOOLS_OT_feather_select_chain(Operator):
@@ -3802,7 +4405,7 @@ class ARANTOOLS_OT_feather_adjust_attr(Operator):
 
 class ARANTOOLS_OT_feather_add_chain(Operator):
     bl_idname = "arantools.feather_add_chain"
-    bl_label = "Add Feather Chain at Cursor"
+    bl_label = "Add Feather at Cursor"
     bl_description = "Add a new 4-vertex feather spline at the 3D Cursor using the active Feather Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3812,18 +4415,17 @@ class ARANTOOLS_OT_feather_add_chain(Operator):
             return {'CANCELLED'}
 
         ui = context.scene.arantools_feather_ui
-        slot_idx = find_or_add_mesh_slot(guide_obj, ui.edge_mesh_obj)
+        fprops = guide_obj.arantools_feather
+        slot_idx = fprops.active_slot_index if (0 <= fprops.active_slot_index < len(fprops.mesh_slots)) else 0
+        if ui.edge_mesh_obj is not None:
+            slot_idx = find_or_add_mesh_slot(guide_obj, ui.edge_mesh_obj)
         cursor_local = guide_obj.matrix_world.inverted_safe() @ context.scene.cursor.location
 
-        if guide_obj.mode != 'EDIT':
-            if context.mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')
-            guide_obj.select_set(True)
-            context.view_layer.objects.active = guide_obj
-            bpy.ops.object.mode_set(mode='EDIT')
+        was_edit = (guide_obj.mode == 'EDIT')
+        bm = bmesh.from_edit_mesh(guide_obj.data) if was_edit else bmesh.new()
+        if not was_edit:
+            bm.from_mesh(guide_obj.data)
 
-        bm = bmesh.from_edit_mesh(guide_obj.data)
         for v in bm.verts:
             v.select = False
         for e in bm.edges:
@@ -3860,8 +4462,18 @@ class ARANTOOLS_OT_feather_add_chain(Operator):
             e.select = True
 
         bm.select_flush_mode()
-        bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=False)
-        regenerate_feather_object(guide_obj)
+        if was_edit:
+            bmesh.update_edit_mesh(guide_obj.data, loop_triangles=False, destructive=True)
+        else:
+            bm.to_mesh(guide_obj.data)
+            bm.free()
+            guide_obj.data.update()
+
+        invalidate_feather_cache(guide_obj)
+        regenerate_feather_object(guide_obj, force_full_rebuild=True)
+        chains = _get_guide_chains_fast(guide_obj)
+        if chains:
+            _set_selected_chain_indices(guide_obj, [len(chains) - 1], isolate_in_edit=was_edit, context=context)
         return {'FINISHED'}
 
 
@@ -3911,7 +4523,7 @@ class ARANTOOLS_OT_feather_create_object(Operator):
 
 
 # ============================================================================
-# Depsgraph Handler & Viewport Direction Overlay
+# Depsgraph Handler, 3D Viewport Header & GPU Overlay
 # ============================================================================
 
 @bpy.app.handlers.persistent
@@ -3924,6 +4536,14 @@ def _feather_depsgraph_update_post(scene, depsgraph):
     guide_obj = get_feather_guide_from_context(context)
     if guide_obj is None:
         return
+
+    fprops = guide_obj.arantools_feather
+
+    # If the artist entered Edit Mode directly via Tab, seamlessly sync into Feather Mode (Vertices)
+    if guide_obj.mode == 'EDIT' and not fprops.in_feather_mode:
+        fprops.in_feather_mode = True
+        if fprops.feather_submode == 'FEATHER_SELECT':
+            fprops.feather_submode = 'VERTEX'
 
     if guide_obj.mode == 'EDIT':
         mesh_updated = False
@@ -3955,19 +4575,43 @@ def _feather_depsgraph_update_post(scene, depsgraph):
         except Exception:
             pass
 
-        if guide_obj.arantools_feather.auto_update:
+        if fprops.auto_update:
             regenerate_feather_object(guide_obj, coords_only_hint=True)
 
 
+def _append_chain_card_geometry(out_obj, target_range, xform_mat, tri_coords, wire_coords):
+    """Append world-space triangles and wireframe lines for a single feather chain range."""
+    if out_obj is None or out_obj.data is None or target_range is None:
+        return
+    _, _, _, p_start, p_end, _, _ = target_range
+    out_mesh = out_obj.data
+    polys = out_mesh.polygons
+    verts = out_mesh.vertices
+    p_end_clamped = min(p_end, len(polys))
+    for pi in range(p_start, p_end_clamped):
+        p_verts = [xform_mat @ verts[vi].co for vi in polys[pi].vertices]
+        if len(p_verts) >= 3:
+            v0 = p_verts[0]
+            for k in range(1, len(p_verts) - 1):
+                tri_coords.extend((v0, p_verts[k], p_verts[k + 1]))
+            for k in range(len(p_verts)):
+                wire_coords.extend((p_verts[k], p_verts[(k + 1) % len(p_verts)]))
+
+
 def _draw_feather_directions_viewport():
-    """Draw Root-to-Tip direction chevrons along visible feather chains + 3D Feather Fill on hover."""
+    """Draw Feather Mode viewport overlays:
+    1. Selected Feather(s) 3D Gold highlight (in Feathers mode)
+    2. Hovered Feather 3D Cyan highlight (in Feathers mode, on normal or mirrored side)
+    3. Root-to-Tip direction chevrons along visible feather chains
+    """
     if bpy.app.background:
         return
     context = bpy.context
     guide_obj = get_feather_guide_from_context(context)
     if guide_obj is None:
         return
-    if guide_obj.mode != 'EDIT' and context.active_object != guide_obj:
+    fprops = guide_obj.arantools_feather
+    if not fprops.in_feather_mode and guide_obj.mode != 'EDIT' and context.active_object != guide_obj:
         return
 
     try:
@@ -3976,7 +4620,6 @@ def _draw_feather_directions_viewport():
     except Exception:
         return
 
-    fprops = guide_obj.arantools_feather
     obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
     if obj_cache is None or obj_cache.get("overlay_data") is None:
         verts_co, edges_v, _, _, edge_bool, _ = _extract_guide_data(guide_obj)
@@ -3991,10 +4634,111 @@ def _draw_feather_directions_viewport():
         return
 
     mw = guide_obj.matrix_world
+    out_obj = fprops.output_object
+    chain_ranges = obj_cache.get("chain_ranges", []) if obj_cache else []
+    range_map = {r[0]: r for r in chain_ranges}
+
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
-    # ── 1. Direction Arrows (only on unhidden chains in Edit Mode) ──────────
+    sel_chains = set(_get_selected_chain_indices(guide_obj)) if fprops.in_feather_mode else set()
+
+    # ── 1. Selected Feather(s) Highlight in Feathers Mode ────────────────────
+    if fprops.in_feather_mode and fprops.feather_submode == 'FEATHER_SELECT' and sel_chains and out_obj is not None:
+        sel_tris = []
+        sel_wires = []
+        sel_spline_lines = []
+        sel_spline_pts = []
+        out_mw = out_obj.matrix_world
+
+        for c_idx in sel_chains:
+            if not (0 <= c_idx < len(chains)):
+                continue
+            tr = range_map.get(c_idx)
+            if tr is not None:
+                _append_chain_card_geometry(out_obj, tr, out_mw, sel_tris, sel_wires)
+            vc = chains[c_idx][0]
+            w_pts = [mw @ Vector(verts_co[vi]) for vi in vc]
+            sel_spline_pts.extend(w_pts)
+            for i in range(len(w_pts) - 1):
+                sel_spline_lines.extend((w_pts[i], w_pts[i + 1]))
+
+        if sel_tris:
+            b_stris = batch_for_shader(shader, 'TRIS', {"pos": sel_tris})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.72, 0.12, 0.30))
+            b_stris.draw(shader)
+
+        if sel_wires:
+            gpu.state.line_width_set(2.2)
+            b_swires = batch_for_shader(shader, 'LINES', {"pos": sel_wires})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.82, 0.18, 0.92))
+            b_swires.draw(shader)
+
+        if sel_spline_lines:
+            gpu.state.line_width_set(3.0)
+            b_slines = batch_for_shader(shader, 'LINES', {"pos": sel_spline_lines})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.90, 0.25, 1.0))
+            b_slines.draw(shader)
+
+        if sel_spline_pts:
+            gpu.state.point_size_set(8.0)
+            b_spts = batch_for_shader(shader, 'POINTS', {"pos": sel_spline_pts})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.95, 0.35, 1.0))
+            b_spts.draw(shader)
+
+    # ── 2. 3D Feather Fill Hover Preview in Feathers Mode ────────────────────
+    if (
+        _FEATHER_PICK_MODAL_ACTIVE
+        and _HOVERED_GUIDE_NAME == guide_obj.name
+        and 0 <= _HOVERED_CHAIN_INDEX < len(chains)
+    ):
+        c_idx = _HOVERED_CHAIN_INDEX
+        target_range = range_map.get(c_idx)
+        refl_mat = _get_mirror_reflection_matrix(fprops) if (_HOVERED_MIRRORED and fprops.use_mirror) else None
+
+        if out_obj is not None and out_obj.data is not None and target_range is not None:
+            out_mw = (refl_mat @ out_obj.matrix_world) if refl_mat is not None else out_obj.matrix_world
+            tri_coords = []
+            wire_coords = []
+            _append_chain_card_geometry(out_obj, target_range, out_mw, tri_coords, wire_coords)
+
+            if tri_coords:
+                b_fill = batch_for_shader(shader, 'TRIS', {"pos": tri_coords})
+                shader.bind()
+                shader.uniform_float("color", (0.15, 0.88, 1.0, 0.42))
+                b_fill.draw(shader)
+
+            if wire_coords:
+                gpu.state.line_width_set(2.5)
+                b_wire = batch_for_shader(shader, 'LINES', {"pos": wire_coords})
+                shader.bind()
+                shader.uniform_float("color", (0.38, 0.96, 1.0, 0.98))
+                b_wire.draw(shader)
+
+        hov_v_chain = chains[c_idx][0]
+        guide_mw = (refl_mat @ mw) if refl_mat is not None else mw
+        hov_pts = [guide_mw @ Vector(verts_co[vi]) for vi in hov_v_chain]
+        if len(hov_pts) >= 2:
+            hov_lines = []
+            for i in range(len(hov_pts) - 1):
+                hov_lines.extend((hov_pts[i], hov_pts[i + 1]))
+            gpu.state.line_width_set(3.5)
+            b_hlines = batch_for_shader(shader, 'LINES', {"pos": hov_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.45, 0.98, 1.0, 1.0))
+            b_hlines.draw(shader)
+
+            gpu.state.point_size_set(9.0)
+            b_hpts = batch_for_shader(shader, 'POINTS', {"pos": hov_pts})
+            shader.bind()
+            shader.uniform_float("color", (0.85, 1.0, 1.0, 1.0))
+            b_hpts.draw(shader)
+
+    # ── 3. Direction Arrows (Root = Blue, Chevrons = Green, Tip = Orange) ────
     if fprops.show_direction_overlay:
         hidden_v = set()
         if guide_obj.mode == 'EDIT':
@@ -4047,7 +4791,7 @@ def _draw_feather_directions_viewport():
         if b_lines is not None:
             gpu.state.line_width_set(2.0)
             shader.bind()
-            shader.uniform_float("color", (0.15, 0.95, 0.45, 0.9))
+            shader.uniform_float("color", (0.15, 0.95, 0.45, 0.88))
             b_lines.draw(shader)
 
         if b_roots is not None:
@@ -4062,75 +4806,94 @@ def _draw_feather_directions_viewport():
             shader.uniform_float("color", (1.0, 0.35, 0.2, 0.95))
             b_tips.draw(shader)
 
-    # ── 2. 3D Feather Fill Hover Preview in Feather Select Mode (3) ─────────
-    if (
-        _FEATHER_PICK_MODAL_ACTIVE
-        and _HOVERED_GUIDE_NAME == guide_obj.name
-        and 0 <= _HOVERED_CHAIN_INDEX < len(chains)
-    ):
-        c_idx = _HOVERED_CHAIN_INDEX
-        out_obj = fprops.output_object
-        chain_ranges = obj_cache.get("chain_ranges", []) if obj_cache else []
-        target_range = next((r for r in chain_ranges if r[0] == c_idx), None)
-
-        if out_obj is not None and out_obj.data is not None and target_range is not None:
-            _, _, _, p_start, p_end, _, _ = target_range
-            out_mesh = out_obj.data
-            out_mw = out_obj.matrix_world
-            tri_coords = []
-            wire_coords = []
-
-            polys = out_mesh.polygons
-            verts = out_mesh.vertices
-            p_end_clamped = min(p_end, len(polys))
-            for pi in range(p_start, p_end_clamped):
-                p_verts = [out_mw @ verts[vi].co for vi in polys[pi].vertices]
-                if len(p_verts) >= 3:
-                    v0 = p_verts[0]
-                    for k in range(1, len(p_verts) - 1):
-                        tri_coords.extend((v0, p_verts[k], p_verts[k + 1]))
-                    for k in range(len(p_verts)):
-                        wire_coords.extend((p_verts[k], p_verts[(k + 1) % len(p_verts)]))
-
-            if tri_coords:
-                b_fill = batch_for_shader(shader, 'TRIS', {"pos": tri_coords})
-                shader.bind()
-                shader.uniform_float("color", (0.15, 0.85, 1.0, 0.42))
-                b_fill.draw(shader)
-
-            if wire_coords:
-                gpu.state.line_width_set(2.5)
-                b_wire = batch_for_shader(shader, 'LINES', {"pos": wire_coords})
-                shader.bind()
-                shader.uniform_float("color", (0.35, 0.95, 1.0, 0.95))
-                b_wire.draw(shader)
-
-        # Also highlight the hovered feather's spline & vertices
-        hov_v_chain = chains[c_idx][0]
-        hov_pts = [mw @ Vector(verts_co[vi]) for vi in hov_v_chain]
-        if len(hov_pts) >= 2:
-            hov_lines = []
-            for i in range(len(hov_pts) - 1):
-                hov_lines.extend((hov_pts[i], hov_pts[i + 1]))
-            gpu.state.line_width_set(3.5)
-            b_hlines = batch_for_shader(shader, 'LINES', {"pos": hov_lines})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.9, 0.2, 1.0))
-            b_hlines.draw(shader)
-
-            gpu.state.point_size_set(10.0)
-            b_hpts = batch_for_shader(shader, 'POINTS', {"pos": hov_pts})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.95, 0.3, 1.0))
-            b_hpts.draw(shader)
-
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
 
 
 # ============================================================================
-# Panel UI Drawing (Called from ARANTOOLS_PT_main)
+# 3D Viewport Header Integration (Top-Left Mode Bar next to Blender Mode)
+# ============================================================================
+
+def _draw_feather_mode_view3d_header(self, context):
+    """Draw the dedicated Feather Mode bar in the 3D Viewport top-left header when a Feather Object is active."""
+    guide_obj = get_feather_guide_from_context(context)
+    if guide_obj is None:
+        return
+
+    fprops = guide_obj.arantools_feather
+    in_fm = bool(fprops.in_feather_mode)
+    cur_sub = fprops.feather_submode
+
+    layout = self.layout
+    layout.separator_spacer()
+
+    row = layout.row(align=True)
+    row.operator(
+        "arantools.feather_toggle_edit",
+        text="Feather Mode",
+        icon='STRANDS',
+        depress=in_fm,
+    )
+
+    if in_fm:
+        sub_row = layout.row(align=True)
+        op_f = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Feathers",
+            icon='STRANDS',
+            depress=(cur_sub == 'FEATHER_SELECT'),
+        )
+        op_f.submode = 'FEATHER_SELECT'
+
+        op_s = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Splines",
+            icon='CURVE_PATH',
+            depress=(cur_sub == 'EDGE'),
+        )
+        op_s.submode = 'EDGE'
+
+        op_v = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Vertices",
+            icon='VERTEXSEL',
+            depress=(cur_sub == 'VERTEX'),
+        )
+        op_v.submode = 'VERTEX'
+
+        tools_row = layout.row(align=True)
+        tools_row.operator("arantools.feather_show_all", text="Show All", icon='HIDE_OFF')
+        tools_row.prop(fprops, "show_direction_overlay", text="", icon='FORWARD', toggle=True)
+        tools_row.prop(fprops, "view_mode", text="")
+
+
+def _install_view3d_header():
+    old_fn = bpy.app.driver_namespace.get(_VIEW3D_HEADER_DRAW_KEY)
+    if old_fn is not None:
+        try:
+            bpy.types.VIEW3D_HT_header.remove(old_fn)
+        except Exception:
+            pass
+    bpy.types.VIEW3D_HT_header.append(_draw_feather_mode_view3d_header)
+    bpy.app.driver_namespace[_VIEW3D_HEADER_DRAW_KEY] = _draw_feather_mode_view3d_header
+
+
+def _uninstall_view3d_header():
+    old_fn = bpy.app.driver_namespace.pop(_VIEW3D_HEADER_DRAW_KEY, None)
+    if old_fn is not None:
+        try:
+            bpy.types.VIEW3D_HT_header.remove(old_fn)
+        except Exception:
+            pass
+    try:
+        bpy.types.VIEW3D_HT_header.remove(_draw_feather_mode_view3d_header)
+    except Exception:
+        pass
+
+
+# ============================================================================
+# N-Panel UI Drawing (UX-Designed Layout with Controls & Advanced Tabs)
 # ============================================================================
 
 def draw_feather_cards_ui(layout, context):
@@ -4138,331 +4901,330 @@ def draw_feather_cards_ui(layout, context):
     guide_obj = get_feather_guide_from_context(context)
 
     if guide_obj is None:
-        conv_box = layout.box()
-        conv_col = conv_box.column(align=True)
-        conv_col.label(text="Scene Setup & Conversion:", icon='COLLECTION_NEW')
-        row = conv_col.row(align=True)
-        row.scale_y = 1.35
+        setup_box = layout.box()
+        scol = setup_box.column(align=True)
+        scol.label(text="Feather Object Setup", icon='STRANDS')
+        scol.separator(factor=0.4)
+        row = scol.row(align=True)
+        row.scale_y = 1.3
         row.operator(
             "arantools.feather_convert_scene",
-            text="Substitute Feathers -> ARANFEATHERS",
+            text="Convert Scene Feathers",
             icon='MOD_PARTICLES',
         )
-        conv_col.operator(
+        scol.separator(factor=0.3)
+        scol.operator(
             "arantools.feather_create_object",
-            text="New Custom Feather Object",
+            text="New Feather Object",
             icon='ADD',
         )
-        info = layout.box()
-        info.label(text="Select a Feather Object (e.g. 'AranFeathers')", icon='INFO')
-        info.label(text="to edit feather splines, meshes & metadata.")
+        scol.separator(factor=0.4)
+        scol.label(text="Select a Feather Object in the viewport.", icon='INFO')
         return
 
     fprops = guide_obj.arantools_feather
     out_obj = fprops.output_object
-    in_edit = (context.active_object == guide_obj and guide_obj.mode == 'EDIT')
-    cur_sub = fprops.feather_submode if in_edit else 'OBJECT'
-    in_feather_mode = in_edit and cur_sub in ('FEATHER_SELECT', 'EDGE')
-    in_vertex_mode = in_edit and cur_sub == 'VERTEX'
+    in_fm = bool(fprops.in_feather_mode)
+    cur_sub = fprops.feather_submode if in_fm else 'OBJECT'
+    in_feather_submode = in_fm and cur_sub in ('FEATHER_SELECT', 'EDGE')
+    in_vertex_submode = in_fm and cur_sub == 'VERTEX'
 
-    # ── Status & Mode Switcher Header (Always Visible) ───────────────────
-    status_box = layout.box()
-    scol = status_box.column(align=True)
-    n_edges = len(guide_obj.data.edges)
-    n_polys = len(out_obj.data.polygons) if (out_obj and out_obj.data) else 0
-    scol.label(
-        text=f"Feather Object: {guide_obj.name}  ({n_edges} edges -> {n_polys} polys)",
-        icon='STRANDS',
-    )
+    # ── 1. Top Mode & Viewport Bar ──────────────────────────────────────────
+    top_box = layout.box()
+    tcol = top_box.column(align=True)
 
-    mode_row = scol.row(align=True)
+    # Primary Mode Enter / Exit Button
+    mode_row = tcol.row(align=True)
     mode_row.scale_y = 1.35
     mode_row.operator(
         "arantools.feather_toggle_edit",
-        text="Exit Feather Mode (Object Mode)" if in_edit else "Enter Feather Mode (Tab)",
-        icon='OBJECT_DATAMODE' if in_edit else 'EDITMODE_HLT',
-        depress=in_edit,
+        text="Exit Feather Mode" if in_fm else "Enter Feather Mode",
+        icon='OBJECT_DATAMODE' if in_fm else 'STRANDS',
+        depress=in_fm,
     )
     mode_row.operator("arantools.feather_regenerate", text="", icon='FILE_REFRESH')
 
-    scol.separator(factor=0.5)
-    scol.label(text="Feather Mode (Keys 1 / 2 / 3  |  Toggle: 4 or Alt+F):", icon='RESTRICT_SELECT_OFF')
-    sub_row = scol.row(align=True)
-    sub_row.scale_y = 1.4
+    # Clean Sub-Mode Switcher (Feathers | Splines | Vertices — no numbers in labels!)
+    if in_fm:
+        tcol.separator(factor=0.4)
+        sub_row = tcol.row(align=True)
+        sub_row.scale_y = 1.3
 
-    op1 = sub_row.operator(
-        "arantools.feather_set_submode",
-        text="1: Vertex",
-        icon='VERTEXSEL',
-        depress=in_vertex_mode,
-    )
-    op1.submode = 'VERTEX'
-
-    op2 = sub_row.operator(
-        "arantools.feather_set_submode",
-        text="2: Spline",
-        icon='EDGESEL',
-        depress=(in_edit and cur_sub == 'EDGE'),
-    )
-    op2.submode = 'EDGE'
-
-    op3 = sub_row.operator(
-        "arantools.feather_set_submode",
-        text="3: Feather Select",
-        icon='RESTRICT_SELECT_OFF',
-        depress=(in_edit and cur_sub == 'FEATHER_SELECT'),
-    )
-    op3.submode = 'FEATHER_SELECT'
-
-    if in_edit:
-        vis_row = scol.row(align=True)
-        vis_row.scale_y = 1.25
-        vis_row.operator(
-            "arantools.feather_show_all",
-            text="Show All Feathers (Alt+H)",
-            icon='HIDE_OFF',
+        op_f = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Feathers",
+            icon='STRANDS',
+            depress=(cur_sub == 'FEATHER_SELECT'),
         )
-        vis_row.operator(
-            "arantools.feather_toggle_select_mode",
-            text="Switch Edit/Select (4)",
-            icon='ARROW_LEFTRIGHT',
+        op_f.submode = 'FEATHER_SELECT'
+
+        op_s = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Splines",
+            icon='CURVE_PATH',
+            depress=(cur_sub == 'EDGE'),
         )
+        op_s.submode = 'EDGE'
 
-    scol.separator(factor=0.4)
-    toggles = scol.row(align=True)
-    toggles.prop(fprops, "auto_update", text="Live Update", toggle=True, icon='AUTO')
-    toggles.prop(fprops, "show_direction_overlay", text="Direction Arrows", toggle=True, icon='FORWARD')
+        op_v = sub_row.operator(
+            "arantools.feather_set_submode",
+            text="Vertices",
+            icon='VERTEXSEL',
+            depress=(cur_sub == 'VERTEX'),
+        )
+        op_v.submode = 'VERTEX'
 
-    scol.separator(factor=0.4)
-    vrow_lbl = scol.row(align=True)
-    vrow_lbl.label(text="View Mode (Material / UVs / IDs / X-Ray):", icon='UV')
-    vrow = scol.row(align=True)
-    vrow.scale_y = 1.25
-    vrow.prop(fprops, "view_mode", expand=True)
+    # Compact Viewport Display Bar (Shading dropdown + Arrows + Live toggles)
+    tcol.separator(factor=0.5)
+    disp_row = tcol.row(align=True)
+    disp_row.prop(fprops, "view_mode", text="")
+    disp_row.prop(fprops, "show_direction_overlay", text="Arrows", toggle=True, icon='FORWARD')
+    disp_row.prop(fprops, "auto_update", text="Live", toggle=True, icon='AUTO')
 
-    # ====================================================================
-    # 1. OBJECT MODE: Admitted Feather Collection Authoring & Object Setup
-    # ====================================================================
-    if not in_edit:
-        adm_box = layout.box()
-        acol = adm_box.column(align=True)
-        acol.label(text="Admitted Feather Meshes (Author in Object Mode):", icon='OUTLINER_COLLECTION')
-        crow = acol.row(align=True)
-        crow.prop(fprops, "admitted_collection", text="Collection")
-        crow.operator("arantools.feather_sync_admitted_collection", text="", icon='FILE_REFRESH')
+    # ── 2. Section Tab Switcher: [ Controls ]  |  [ Advanced ] ──────────────
+    tab_row = layout.row(align=True)
+    tab_row.scale_y = 1.2
+    tab_row.prop(ui, "panel_tab", expand=True)
 
-        admitted_slots = get_admitted_mesh_slots(guide_obj)
-        if admitted_slots:
-            list_box = acol.box()
-            lcol = list_box.column(align=True)
-            lcol.label(text=f"Admitted Meshes ({len(admitted_slots)}):", icon='MESH_DATA')
-            for slot_idx, mobj in admitted_slots:
-                r = lcol.row(align=True)
-                r.label(text=f"• {mobj.name}", icon='OUTLINER_OB_MESH')
-        else:
-            acol.label(text="Assign a Collection containing feather card meshes.", icon='INFO')
+    # ========================================================================
+    # TAB A: CONTROLS (Contextual to Object Mode / Feathers Mode / Vertices Mode)
+    # ========================================================================
+    if ui.panel_tab == 'CONTROLS':
 
-        # Object-Level Output Settings
-        obj_box = layout.box()
-        ocol = obj_box.column(align=True)
-        ocol.label(text="Output Mesh Settings:", icon='MODIFIER')
+        # ── CASE 1: OBJECT MODE (Author Admitted Feather Collection) ────────
+        if not in_fm:
+            adm_box = layout.box()
+            acol = adm_box.column(align=True)
+            acol.label(text="Admitted Feather Meshes", icon='OUTLINER_COLLECTION')
+            acol.separator(factor=0.3)
+
+            crow = acol.row(align=True)
+            crow.prop(fprops, "admitted_collection", text="Collection")
+            crow.operator("arantools.feather_sync_admitted_collection", text="", icon='FILE_REFRESH')
+
+            acol.separator(factor=0.4)
+            acol.template_list(
+                "ARANTOOLS_UL_FeatherAdmittedList",
+                "",
+                fprops,
+                "mesh_slots",
+                fprops,
+                "active_slot_index",
+                rows=4,
+            )
+
+            chains = _get_guide_chains_fast(guide_obj)
+            n_polys = len(out_obj.data.polygons) if (out_obj and out_obj.data) else 0
+            sub_info = acol.row(align=True)
+            sub_info.enabled = False
+            sub_info.label(text=f"{len(chains)} Feathers  •  {n_polys} Faces")
+
+        # ── CASE 2: FEATHERS / SPLINES MODE (Entire-Feather Controls Only) ──
+        elif in_feather_submode:
+            sel_chains = _get_selected_chain_indices(guide_obj)
+            n_sel = len(sel_chains)
+
+            # A. Feather Tools Card
+            tool_box = layout.box()
+            t_col = tool_box.column(align=True)
+            hdr_row = t_col.row(align=True)
+            if n_sel == 0:
+                hdr_row.label(text="Click a feather in the viewport", icon='RESTRICT_SELECT_OFF')
+            elif n_sel == 1:
+                hdr_row.label(text=f"1 Feather Selected (#{sel_chains[0] + 1})", icon='STRANDS')
+            else:
+                hdr_row.label(text=f"{n_sel} Feathers Selected", icon='STRANDS')
+
+            t_col.separator(factor=0.3)
+            r1 = t_col.row(align=True)
+            r1.scale_y = 1.2
+            op_sall = r1.operator("arantools.feather_select_all", text="Select All", icon='SELECT_EXTEND')
+            op_sall.action = 'SELECT'
+            op_snone = r1.operator("arantools.feather_select_all", text="Clear", icon='X')
+            op_snone.action = 'DESELECT'
+            r1.operator("arantools.feather_show_all", text="Show All", icon='HIDE_OFF')
+
+            t_col.separator(factor=0.25)
+            r2 = t_col.row(align=True)
+            r2.scale_y = 1.2
+            r2.operator("arantools.feather_add_chain", text="Add Feather", icon='ADD')
+            r2.operator("arantools.feather_duplicate_selected", text="Duplicate", icon='DUPLICATE')
+            r2.operator("arantools.feather_delete_selected", text="Delete", icon='TRASH')
+
+            # B. Feather Mesh List (Native UIList — Click = Only, Shift+Click/Checkbox = Random)
+            mesh_box = layout.box()
+            mcol = mesh_box.column(align=True)
+            mcol.label(text="Feather Mesh", icon='OUTLINER_OB_MESH')
+
+            hint_row = mcol.row(align=True)
+            hint_row.enabled = False
+            hint_row.label(text="Click name = Single   •   Check / Shift = Random")
+
+            mcol.separator(factor=0.2)
+            mcol.template_list(
+                "ARANTOOLS_UL_FeatherAdmittedList",
+                "",
+                fprops,
+                "mesh_slots",
+                fprops,
+                "active_slot_index",
+                rows=4,
+            )
+
+            # Quick Pool Actions: All | None | Re-Roll
+            pool_row = mcol.row(align=True)
+            pool_row.scale_y = 1.15
+            op_all = pool_row.operator("arantools.feather_mesh_mask_all_none", text="All", icon='CHECKBOX_HLT')
+            op_all.mode = 'ALL'
+            op_none = pool_row.operator("arantools.feather_mesh_mask_all_none", text="None", icon='CHECKBOX_DEHLT')
+            op_none.mode = 'NONE'
+            op_reroll = pool_row.operator("arantools.feather_mesh_mask_all_none", text="Re-Roll", icon='FILE_REFRESH')
+            op_reroll.mode = 'REROLL'
+
+            # Clean 1-line summary of active mesh assignment
+            and_mask, or_mask, num_sel_edges = get_selected_feathers_mask_state(guide_obj)
+            admitted_slots = get_admitted_mesh_slots(guide_obj)
+            checked_names = [
+                mobj.name for s_idx, mobj in admitted_slots
+                if s_idx >= 0 and (or_mask & (1 << s_idx)) != 0 and num_sel_edges > 0
+            ]
+            stat_row = mcol.row(align=True)
+            if num_sel_edges == 0:
+                stat_row.enabled = False
+                stat_row.label(text="No feather selected", icon='INFO')
+            elif len(checked_names) == 0:
+                stat_row.label(text="Assigned: None (Hidden)", icon='ERROR')
+            elif len(checked_names) == 1:
+                stat_row.label(text=f"Assigned: Only {checked_names[0]}", icon='PINNED')
+            else:
+                stat_row.label(text=f"Assigned: Random ({len(checked_names)} meshes)", icon='MOD_PARTICLES')
+
+            # C. Direction Card
+            dir_box = layout.box()
+            dcol = dir_box.column(align=True)
+            dcol.label(text="Direction", icon='FORWARD')
+            dcol.separator(factor=0.3)
+            drow = dcol.row(align=True)
+            drow.scale_y = 1.25
+            drow.operator("arantools.feather_flip_direction", text="Flip Direction", icon='FILE_REFRESH')
+            drow.operator("arantools.feather_flip_keep_look", text="Flip (Keep Look)", icon='ARROW_LEFTRIGHT')
+
+            # D. Spline Shape Card
+            spline_box = layout.box()
+            spcol = spline_box.column(align=True)
+            spcol.label(text="Spline Shape", icon='CURVE_PATH')
+            spcol.separator(factor=0.3)
+            spcol.prop(ui, "edge_subdiv", text="Subdivisions", slider=True)
+            spcol.prop(ui, "edge_smooth_spline", text="Smooth Spline", slider=True)
+            spcol.prop(ui, "edge_smooth_tilt", text="Smooth Tilt", slider=True)
+
+        # ── CASE 3: VERTICES MODE (Per-Vertex Controls Only) ────────────────
+        elif in_vertex_submode:
+            vtool_box = layout.box()
+            vtcol = vtool_box.column(align=True)
+            vtcol.label(text="Vertex Tools", icon='VERTEXSEL')
+            vtcol.separator(factor=0.3)
+
+            vtr1 = vtcol.row(align=True)
+            vtr1.scale_y = 1.2
+            vtr1.prop(ui, "apply_whole_chain", text="Whole Feather", toggle=True, icon='LINKED')
+            vtr1.operator("arantools.feather_show_all", text="Show All", icon='HIDE_OFF')
+
+            vtcol.separator(factor=0.25)
+            vtr2 = vtcol.row(align=True)
+            vtr2.scale_y = 1.2
+            vtr2.operator("arantools.feather_taper_radius", text="Taper Root -> Tip", icon='IPO_LINEAR')
+            vtr2.operator("arantools.feather_select_chain", text="Select Linked", icon='LINKED')
+
+            vert_box = layout.box()
+            vcol = vert_box.column(align=True)
+            vcol.label(text="Vertex Shape", icon='SURFACE_NCURVE')
+            vcol.separator(factor=0.3)
+            vcol.prop(ui, "vert_radius", text="Radius (Width)", slider=True)
+            vcol.prop(ui, "vert_tilt", text="Tilt (Twist)", slider=True)
+            vcol.prop(ui, "vert_smooth", text="Smooth", slider=True)
+
+    # ========================================================================
+    # TAB B: ADVANCED (Surface Projection, Baking, Mirror & Scene Setup)
+    # ========================================================================
+    else:
+        # 1. Surface Follow & Push Offsets
+        surf_box = layout.box()
+        scol = surf_box.column(align=True)
+        scol.label(text="Surface Follow & Push", icon='SNAP_FACE')
+        scol.separator(factor=0.3)
+        scol.prop(fprops, "surface_object", text="Body Mesh")
+        scol.separator(factor=0.3)
+        scol.prop(ui, "vert_pushout", text="Push Out", slider=True)
+        scol.prop(ui, "vert_pushtip", text="Push Tip", slider=True)
+        scol.prop(ui, "vert_followsurface", text="Follow Surface", slider=True)
+        scol.prop(ui, "vert_tilttosurface", text="Tilt to Surface", slider=True)
+
+        # 2. Bake Procedural Offsets to Vertices
+        bake_box = layout.box()
+        bcol = bake_box.column(align=True)
+        bcol.label(text="Bake Offsets to Vertices", icon='MOD_DATA_TRANSFER')
+        bcol.separator(factor=0.3)
+        brow1 = bcol.row(align=True)
+        brow1.scale_y = 1.25
+        op_b_all = brow1.operator(
+            "arantools.feather_bake_parameters",
+            text="Bake All Feathers",
+            icon='CHECKMARK',
+        )
+        op_b_all.only_selected = False
+        op_b_all.bake_spline_smoothing = False
+
+        op_b_sel = brow1.operator(
+            "arantools.feather_bake_parameters",
+            text="Bake Selected",
+            icon='RESTRICT_SELECT_OFF',
+        )
+        op_b_sel.only_selected = True
+        op_b_sel.bake_spline_smoothing = False
+
+        bcol.separator(factor=0.25)
+        brow2 = bcol.row(align=True)
+        brow2.scale_y = 1.2
+        op_b_full = brow2.operator(
+            "arantools.feather_bake_parameters",
+            text="Bake All + Spline Smoothing -> 0",
+            icon='MOD_SMOOTH',
+        )
+        op_b_full.only_selected = in_fm
+        op_b_full.bake_spline_smoothing = True
+
+        # 3. Output & Mirror Settings
+        out_box = layout.box()
+        ocol = out_box.column(align=True)
+        ocol.label(text="Generator & Mirror", icon='MODIFIER')
+        ocol.separator(factor=0.3)
         ocol.prop(fprops, "material", text="Material")
-        ocol.prop(fprops, "surface_object", text="Surface Mesh")
         ocol.prop(fprops, "deform_axis", text="Deform Axis")
-        ocol.prop(fprops, "random_seed", text="Global Random Seed")
+        ocol.prop(fprops, "random_seed", text="Global Seed")
         mrow = ocol.row(align=True)
         mrow.prop(fprops, "use_mirror", text="Mirror")
         sub = mrow.row(align=True)
         sub.enabled = fprops.use_mirror
         sub.prop(fprops, "mirror_object", text="")
+        ocol.separator(factor=0.3)
+        ocol.prop(ui, "edge_reverse", text="Reversed Direction Flag")
 
-        # Scene Setup & Conversion
+        # 4. Scene Setup & Conversion
         conv_box = layout.box()
-        conv_col = conv_box.column(align=True)
-        conv_col.label(text="Scene Setup & Conversion:", icon='COLLECTION_NEW')
-        row = conv_col.row(align=True)
-        row.scale_y = 1.25
-        row.operator(
+        ccol = conv_box.column(align=True)
+        ccol.label(text="Scene Setup", icon='COLLECTION_NEW')
+        ccol.separator(factor=0.3)
+        ccol.operator(
             "arantools.feather_convert_scene",
             text="Substitute Feathers -> ARANFEATHERS",
             icon='MOD_PARTICLES',
         )
-        conv_col.operator(
+        ccol.operator(
             "arantools.feather_create_object",
             text="New Custom Feather Object",
             icon='ADD',
         )
-
-    # ====================================================================
-    # 2. FEATHER MODE ONLY (3: Feather Select / 2: Spline):
-    #    ONLY Entire-Feather Settings (Mesh Checkboxes, Random Selection, Direction, Spline)
-    # ====================================================================
-    elif in_feather_mode:
-        edge_box = layout.box()
-        ecol = edge_box.column(align=True)
-        ecol.label(text="Entire Feather Settings (Feather Mode):", icon='OUTLINER_OB_MESH')
-
-        admitted_slots = get_admitted_mesh_slots(guide_obj)
-        and_mask, or_mask, num_sel_edges = get_selected_feathers_mask_state(guide_obj)
-
-        ecol.separator(factor=0.3)
-        if fprops.admitted_collection is not None:
-            ecol.label(
-                text=f"Admitted Feathers ({fprops.admitted_collection.name}) — Click = ONLY | Shift+Click = Random:",
-                icon='CHECKBOX_HLT',
-            )
-        else:
-            ecol.label(
-                text="Admitted Feathers — Click = ONLY | Shift+Click = Random:",
-                icon='CHECKBOX_HLT',
-            )
-
-        # All / None / Re-Roll Random buttons
-        all_none_row = ecol.row(align=True)
-        all_none_row.scale_y = 1.2
-        op_all = all_none_row.operator("arantools.feather_mesh_mask_all_none", text="All (Random All)", icon='CHECKBOX_HLT')
-        op_all.mode = 'ALL'
-        op_none = all_none_row.operator("arantools.feather_mesh_mask_all_none", text="None", icon='CHECKBOX_DEHLT')
-        op_none.mode = 'NONE'
-        op_reroll = all_none_row.operator("arantools.feather_mesh_mask_all_none", text="Re-Roll Seed", icon='FILE_REFRESH')
-        op_reroll.mode = 'REROLL'
-
-        if admitted_slots:
-            chk_box = ecol.box()
-            ccol = chk_box.column(align=True)
-            checked_names = []
-            for slot_idx, mobj in admitted_slots:
-                bit = 1 << slot_idx
-                is_all_checked = (and_mask & bit) != 0 and num_sel_edges > 0
-                is_some_checked = (or_mask & bit) != 0 and num_sel_edges > 0
-                if is_some_checked:
-                    checked_names.append(mobj.name)
-
-                if is_all_checked:
-                    chk_icon = 'CHECKBOX_HLT'
-                elif is_some_checked:
-                    chk_icon = 'DOT'
-                else:
-                    chk_icon = 'CHECKBOX_DEHLT'
-
-                row = ccol.row(align=True)
-                row.scale_y = 1.25
-                op = row.operator(
-                    "arantools.feather_assign_slot",
-                    text=mobj.name,
-                    depress=is_some_checked,
-                    icon=chk_icon,
-                )
-                op.slot_index = slot_idx
-                op.mesh_name = mobj.name
-
-            # Selection summary status
-            if num_sel_edges == 0:
-                ccol.label(text="Select a feather in the viewport to inspect/assign meshes.", icon='INFO')
-            elif len(checked_names) == 0:
-                ccol.label(text="Active: None (Feather Hidden)", icon='ERROR')
-            elif len(checked_names) == 1:
-                ccol.label(text=f"Active: ONLY '{checked_names[0]}'", icon='PINNED')
-            else:
-                ccol.label(
-                    text=f"Active: Random between {len(checked_names)} meshes ({', '.join(checked_names)})",
-                    icon='MOD_PARTICLES',
-                )
-        else:
-            ecol.label(text="No admitted feather meshes found. Assign a Collection in Object Mode.", icon='INFO')
-
-        ecol.separator(factor=0.6)
-
-        # Direction controls — Only in Feather Mode
-        ecol.label(text="Direction (Blue = Start, Orange = End):", icon='FORWARD')
-        drow1 = ecol.row(align=True)
-        drow1.scale_y = 1.3
-        drow1.operator(
-            "arantools.feather_flip_direction",
-            text="Flip Direction",
-            icon='FILE_REFRESH',
-        )
-        drow2 = ecol.row(align=True)
-        drow2.scale_y = 1.3
-        drow2.operator(
-            "arantools.feather_flip_keep_look",
-            text="Flip (Keep Look) — Invert Base Meshes",
-            icon='ARROW_LEFTRIGHT',
-        )
-        ecol.prop(ui, "edge_reverse", text="Reversed Direction Flag")
-
-        ecol.separator(factor=0.6)
-        srow = ecol.row(align=True)
-        srow.prop(ui, "edge_subdiv", text="Subdiv")
-        srow.prop(ui, "edge_smooth_tilt", text="Smooth Tilt")
-        srow.prop(ui, "edge_smooth_spline", text="Smooth Spline")
-
-        arow = ecol.row(align=True)
-        arow.operator("arantools.feather_select_chain", text="Select Whole Feather", icon='LINKED')
-        arow.operator("arantools.feather_add_chain", text="+ Add Feather at Cursor", icon='ADD')
-
-    # ====================================================================
-    # 3. VERTEX MODE ONLY (1: Vertex):
-    #    ONLY Per-Vertex Settings (Radius, Tilt, Smooth, Push Out, Follow Surface, Bake)
-    # ====================================================================
-    elif in_vertex_mode:
-        vert_box = layout.box()
-        vcol = vert_box.column(align=True)
-        hdr = vcol.row(align=True)
-        hdr.label(text="Per-Vertex Settings (Vertex Mode):", icon='VERTEXSEL')
-        hdr.prop(ui, "apply_whole_chain", text="Whole Feather", toggle=True)
-
-        vcol.prop(ui, "vert_radius", text="Radius", slider=True)
-        vcol.prop(ui, "vert_tilt", text="Tilt (rad)", slider=True)
-        vcol.prop(ui, "vert_smooth", text="Smooth", slider=True)
-
-        vcol.separator(factor=0.4)
-        erow = vcol.row(align=True)
-        erow.prop(
-            ui,
-            "show_extra_attrs",
-            text="Surface & Push Metadata",
-            icon='TRIA_DOWN' if ui.show_extra_attrs else 'TRIA_RIGHT',
-            emboss=False,
-        )
-        if ui.show_extra_attrs:
-            vcol.prop(fprops, "surface_object", text="Surface Mesh")
-            vcol.prop(ui, "vert_pushout", slider=True)
-            vcol.prop(ui, "vert_pushtip", slider=True)
-            vcol.prop(ui, "vert_followsurface", slider=True)
-            vcol.prop(ui, "vert_tilttosurface", slider=True)
-
-        vcol.separator(factor=0.6)
-        vcol.label(text="Bake Parameters to Vertices & Reset to 0:", icon='MOD_DATA_TRANSFER')
-        bake_row1 = vcol.row(align=True)
-        bake_row1.scale_y = 1.3
-        op_bake_all = bake_row1.operator(
-            "arantools.feather_bake_parameters",
-            text="Bake Push / Surface / Smooth (All Feathers)",
-            icon='CHECKMARK',
-        )
-        op_bake_all.only_selected = False
-        op_bake_all.bake_spline_smoothing = False
-
-        bake_row_sel = vcol.row(align=True)
-        bake_row_sel.scale_y = 1.25
-        op_bake_sel = bake_row_sel.operator(
-            "arantools.feather_bake_parameters",
-            text="Bake Selected Feather(s) Only",
-            icon='RESTRICT_SELECT_OFF',
-        )
-        op_bake_sel.only_selected = True
-        op_bake_sel.bake_spline_smoothing = False
-
-        bake_row2 = vcol.row(align=True)
-        bake_row2.scale_y = 1.2
-        op_bake_full = bake_row2.operator(
-            "arantools.feather_bake_parameters",
-            text="Bake ALL (Include Smooth Spline & Tilt -> 0)",
-            icon='MOD_SMOOTH',
-        )
-        op_bake_full.only_selected = True
-        op_bake_full.bake_spline_smoothing = True
 
 
 # ============================================================================
@@ -4473,6 +5235,7 @@ classes = (
     ARANTOOLS_PG_FeatherMeshSlot,
     ARANTOOLS_PG_FeatherObject,
     ARANTOOLS_PG_FeatherSceneUI,
+    ARANTOOLS_UL_FeatherAdmittedList,
     ARANTOOLS_OT_feather_convert_scene,
     ARANTOOLS_OT_feather_bake_parameters,
     ARANTOOLS_OT_feather_toggle_edit,
@@ -4480,6 +5243,10 @@ classes = (
     ARANTOOLS_OT_feather_select_modal,
     ARANTOOLS_OT_feather_set_submode,
     ARANTOOLS_OT_feather_toggle_select_mode,
+    ARANTOOLS_OT_feather_select_all,
+    ARANTOOLS_OT_feather_duplicate_selected,
+    ARANTOOLS_OT_feather_delete_selected,
+    ARANTOOLS_OT_feather_taper_radius,
     ARANTOOLS_OT_feather_regenerate,
     ARANTOOLS_OT_feather_flip_direction,
     ARANTOOLS_OT_feather_flip_keep_look,
@@ -4494,7 +5261,7 @@ classes = (
 
 
 def _register_feather_keymaps():
-    """Register Feather Mode shortcuts (1: Vertex, 2: Spline, 3: Feather Select, 4 / Alt+F: Toggle, Alt+H: Show All)."""
+    """Register Feather Mode shortcuts (1: Vertices, 2: Splines, 3: Feathers, 4 / Alt+F: Toggle, Alt+H: Show All)."""
     _unregister_feather_keymaps()
     wm = getattr(bpy.context, "window_manager", None)
     if wm is None or wm.keyconfigs.addon is None:
@@ -4563,7 +5330,6 @@ def _auto_setup_open_scene_timer():
                 except Exception as exc:
                     print(f"[AranTools] Auto-convert feathers warning: {exc}")
             else:
-                # Refresh existing Feather Guide objects so admitted collection, material, surface mesh & UV view mode are up to date
                 for obj in bpy.data.objects:
                     fprops = getattr(obj, "arantools_feather", None)
                     if fprops is not None and fprops.is_feather_guide:
@@ -4611,6 +5377,7 @@ def register():
         except Exception:
             _DRAW_HANDLER = None
 
+    _install_view3d_header()
     _register_feather_keymaps()
 
     try:
@@ -4624,6 +5391,7 @@ def unregister():
     _FEATHER_PICK_MODAL_ACTIVE = False
     _HOVERED_CHAIN_INDEX = -1
     _unregister_feather_keymaps()
+    _uninstall_view3d_header()
     if _DRAW_HANDLER is not None:
         try:
             bpy.types.SpaceView3D.draw_handler_remove(_DRAW_HANDLER, 'WINDOW')

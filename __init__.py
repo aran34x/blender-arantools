@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Aran Tools",
     "author": "Aran",
-    "version": (0, 2, 7),
+    "version": (0, 2, 8),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Aran Tools",
     "description": "A collection of rigging, weight, organization, animation, and naming tools.",
