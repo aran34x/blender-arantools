@@ -32,6 +32,8 @@ from . import primitive_buildings
 import importlib as _importlib
 from . import feather_cards
 _importlib.reload(feather_cards)
+from . import feather_overlaps
+_importlib.reload(feather_overlaps)
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -2330,10 +2332,21 @@ def _uninstall_topbar_button():
         pass
 
 
+class ARANTOOLS_AddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    # Registered by feather_cards.register(), which runs before this class is registered
+    feather_look: bpy.props.PointerProperty(type=feather_cards.ARANTOOLS_PG_FeatherLook)
+
+    def draw(self, context):
+        feather_cards.draw_feather_look_prefs(self.layout, self.feather_look)
+
+
 classes = [
     ARANTOOLS_OT_reload_addon,
     ARANTOOLS_OT_clear_search,
     ARANTOOLS_PT_main,
+    ARANTOOLS_AddonPreferences,
 ]
 
 
@@ -2357,6 +2370,7 @@ def register():
     primitive_buildings.register()
     tree_retopo.register()
     feather_cards.register()
+    feather_overlaps.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -2410,6 +2424,7 @@ def unregister():
         except Exception:
             pass
     for _mod in (
+        feather_overlaps,
         feather_cards,
         tree_retopo,
         primitive_buildings,
