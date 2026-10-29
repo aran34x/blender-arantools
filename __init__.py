@@ -311,12 +311,7 @@ class ARANTOOLS_PT_main(Panel):
 
         sel = context.selected_objects
         meshes = [o for o in sel if o.type == 'MESH']
-        armature = None
-        active = context.active_object
-        if active is not None and active.type == 'ARMATURE':
-            armature = active
-        else:
-            armature = next((o for o in sel if o.type == 'ARMATURE'), None)
+        armature = auto_weights.resolve_armature(context, meshes)
 
         # ── THE BUTTON (top, always visible) ──────────────────────────────
         run = layout.row()
@@ -329,9 +324,10 @@ class ARANTOOLS_PT_main(Panel):
 
         # ── Selection status ──────────────────────────────────────────────
         if not meshes:
-            col.label(text="Select mesh(es) + the armature.", icon='ERROR')
+            col.label(text="Select mesh(es) (+ the armature).", icon='ERROR')
         elif armature is None:
-            col.label(text="Also select the armature.", icon='ERROR')
+            col.label(text="Select the armature, or a rigged mesh.",
+                      icon='ERROR')
         else:
             col.label(text=f"{len(meshes)} mesh(es)  →  {armature.name}",
                       icon='CHECKMARK')
@@ -342,13 +338,26 @@ class ARANTOOLS_PT_main(Panel):
         col.label(text="Scope:", icon='FILTER')
         col.prop(props, "only_selected_bones")
         if props.only_selected_bones:
-            col.label(text="Select bones in Pose/Edit Mode.", icon='BONE_DATA')
+            col.label(text="No bones selected = all deform bones.",
+                      icon='BONE_DATA')
         col.prop(props, "only_selected_verts")
         if props.only_selected_verts:
-            col.label(text="Select verts in Edit Mode first.", icon='INFO')
+            col.label(text="Select verts in Edit Mode to redo the bind.",
+                      icon='INFO')
+            col.label(text="Selected parts are rigged as their own mesh.",
+                      icon='INFO')
 
-        col.label(text="Selected parts are rigged as their own mesh.",
-                  icon='INFO')
+        col.separator()
+        col.prop(props, "contrast", slider=True)
+        col.label(text=">1 sharper / harder, <1 softer blends.", icon='INFO')
+
+        col.separator()
+        box = layout.box()
+        bcol = box.column(align=True)
+        bcol.label(text="Remove Groups by Name", icon='GROUP_VERTEX')
+        bcol.prop(props, "remove_filter", text="Contains")
+        bcol.operator("arantools.remove_weight_groups",
+                      text="Remove + Renormalize", icon='TRASH')
 
     def _draw_t_feather_rigger(self, layout, context):
         fr = context.scene.arantools_feather_rig

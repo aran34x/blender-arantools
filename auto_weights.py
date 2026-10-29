@@ -39,6 +39,22 @@ class ARANTOOLS_PG_AutoWeights(PropertyGroup):
                     "its own separate mesh. Unselected vertices are untouched",
         default=True,
     )
+    contrast: bpy.props.FloatProperty(
+        name="Contrast",
+        description="Sharpen or soften the baked weights. 1.0 = Blender's raw "
+                    "result. Above 1 pushes each vertex toward its strongest "
+                    "bone (harder, more rigid falloff); below 1 spreads "
+                    "influence more evenly (softer blends). Each vertex's "
+                    "total weight is preserved",
+        default=1.0, min=0.2, max=6.0, soft_min=0.5, soft_max=3.0,
+        precision=2,
+    )
+    remove_filter: bpy.props.StringProperty(
+        name="Name Contains",
+        description="Vertex groups whose name contains this text (case-insensitive) "
+                    "are removed by 'Remove Groups'",
+        default="feather",
+    )
 
 
 # ============================================================================
@@ -46,6 +62,51 @@ class ARANTOOLS_PG_AutoWeights(PropertyGroup):
 # ============================================================================
 
 _ORIG_IDX_ATTR = "arantools_orig_idx"
+
+
+def resolve_armature(context, meshes):
+    """Armature to bind to: the active/selected armature if there is one,
+    otherwise the first armature already driving one of the meshes through an
+    Armature modifier (so an already-rigged mesh can be re-bound on its own)."""
+    active = context.active_object
+    if active is not None and active.type == 'ARMATURE':
+        return active
+    arm = next((o for o in context.selected_objects if o.type == 'ARMATURE'),
+               None)
+    if arm is not None:
+        return arm
+    for m in meshes:
+        for mod in m.modifiers:
+            if mod.type == 'ARMATURE' and mod.object is not None:
+                return mod.object
+    return None
+
+
+def _apply_contrast(obj, bone_names, gamma, only_selected):
+    """Raise each vertex's weights (over bone_names' groups) to `gamma` and
+    renormalize so the vertex keeps its original total on those groups."""
+    if abs(gamma - 1.0) < 1e-4:
+        return
+    groups = [obj.vertex_groups.get(n) for n in bone_names]
+    groups = [g for g in groups if g is not None]
+    if not groups:
+        return
+    index_of = {g.index: g for g in groups}
+    for v in obj.data.vertices:
+        if only_selected and not v.select:
+            continue
+        ws = [(index_of[e.group], e.weight) for e in v.groups
+              if e.group in index_of and e.weight > 0.0]
+        total = sum(w for _, w in ws)
+        if total <= 0.0:
+            continue
+        powered = [(g, w ** gamma) for g, w in ws]
+        ptotal = sum(w for _, w in powered)
+        if ptotal <= 0.0:
+            continue
+        scale = total / ptotal
+        for g, w in powered:
+            g.add([v.index], w * scale, 'REPLACE')
 
 
 def _has_armature_modifier(obj, armature):
@@ -208,9 +269,8 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
 
     @classmethod
     def poll(cls, context):
-        sel = context.selected_objects
-        return (any(o.type == 'MESH' for o in sel)
-                and any(o.type == 'ARMATURE' for o in sel))
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        return bool(meshes) and resolve_armature(context, meshes) is not None
 
     def execute(self, context):
         props = context.scene.arantools_auto_weights
@@ -223,34 +283,36 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
         sel = context.selected_objects
         meshes = [o for o in sel if o.type == 'MESH']
 
-        active = context.active_object
-        if active is not None and active.type == 'ARMATURE':
-            armature = active
-        else:
-            armature = next((o for o in sel if o.type == 'ARMATURE'), None)
+        armature = resolve_armature(context, meshes)
 
         if not meshes or armature is None:
-            self.report({'ERROR'}, "Select at least one Mesh and one Armature.")
+            self.report({'ERROR'},
+                        "Select a Mesh and an Armature (or a mesh already "
+                        "rigged to one).")
+            return {'CANCELLED'}
+        if armature.name not in context.view_layer.objects:
+            self.report({'ERROR'}, f"Armature '{armature.name}' is not in the "
+                                   "current view layer.")
             return {'CANCELLED'}
 
         # ── Resolve the target bone set ───────────────────────────────────
+        # Selected bones if any are selected; otherwise every deform bone.
         deform_bones = [b for b in armature.data.bones if b.use_deform]
-        if props.only_selected_bones:
+        if not deform_bones:
+            self.report({'ERROR'}, "Armature has no deform bones.")
+            return {'CANCELLED'}
+        target_bone_names = [b.name for b in deform_bones]
+        restrict_bones = False
+        if props.only_selected_bones and not armature.hide_viewport:
             selected_names = _selected_bone_names(context, armature)
-            target_bone_names = [b.name for b in deform_bones
-                                 if b.name in selected_names]
-            if not target_bone_names:
-                if selected_names:
-                    self.report({'ERROR'},
-                                "Selected bones have no Deform flag — enable "
-                                "Deform or select deform bones.")
-                else:
-                    self.report({'ERROR'}, "No selected bones in the armature.")
-                return {'CANCELLED'}
-        else:
-            target_bone_names = [b.name for b in deform_bones]
-            if not target_bone_names:
-                self.report({'ERROR'}, "Armature has no deform bones.")
+            picked = [b.name for b in deform_bones if b.name in selected_names]
+            if picked:
+                target_bone_names = picked
+                restrict_bones = True
+            elif selected_names:
+                self.report({'ERROR'},
+                            "Selected bones have no Deform flag — enable "
+                            "Deform or select deform bones.")
                 return {'CANCELLED'}
 
         # ── When scoping to selected parts, keep only meshes that have some ─
@@ -265,7 +327,7 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
 
         # ── Temporarily restrict deform to the target bones ────────────────
         saved_deform = None
-        if props.only_selected_bones:
+        if restrict_bones:
             saved_deform = {b.name: b.use_deform for b in armature.data.bones}
             keep = set(target_bone_names)
             for b in armature.data.bones:
@@ -280,6 +342,7 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
                     result = _bake_selection_as_own_mesh(
                         context, m, armature, target_bone_names)
                     _apply_weights_to_selection(m, result)
+                    _apply_contrast(m, target_bone_names, props.contrast, True)
             else:
                 # Whole-mesh Automatic Weights on all selected meshes at once.
                 bpy.ops.object.select_all(action='DESELECT')
@@ -288,6 +351,8 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
                 armature.select_set(True)
                 context.view_layer.objects.active = armature
                 bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+                for m in meshes:
+                    _apply_contrast(m, target_bone_names, props.contrast, False)
         except RuntimeError as e:
             self.report({'ERROR'}, f"Auto-weight bind failed: {e}")
             return {'CANCELLED'}
@@ -307,7 +372,7 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
         context.view_layer.objects.active = armature
 
         scope = []
-        if props.only_selected_bones:
+        if restrict_bones:
             scope.append(f"{len(target_bone_names)} bone(s)")
         if props.only_selected_verts:
             scope.append("selected parts")
@@ -318,12 +383,117 @@ class ARANTOOLS_OT_AutoWeightsSelected(Operator):
 
 
 # ============================================================================
+# Remove weight groups by name
+# ============================================================================
+
+class ARANTOOLS_OT_RemoveWeightGroups(Operator):
+    """Remove every vertex group whose name contains the filter text from the
+    selected mesh(es), then renormalize the vertices that lost weight"""
+    bl_idname = "arantools.remove_weight_groups"
+    bl_label = "Remove Groups by Name"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == 'MESH' for o in context.selected_objects) or (
+            context.active_object is not None
+            and context.active_object.type == 'MESH')
+
+    def execute(self, context):
+        text = context.scene.arantools_auto_weights.remove_filter.strip().lower()
+        if not text:
+            self.report({'ERROR'}, "Enter the text to match in 'Name Contains'.")
+            return {'CANCELLED'}
+
+        meshes = {o for o in context.selected_objects if o.type == 'MESH'}
+        if context.active_object is not None and context.active_object.type == 'MESH':
+            meshes.add(context.active_object)
+
+        # Vertex-group writes are refused in Edit Mode: drop to Object Mode (which
+        # also flushes the vertex selection), run, then go back.
+        was_edit = context.mode == 'EDIT_MESH'
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            return self._run(context, meshes, text, was_edit)
+        finally:
+            if was_edit:
+                bpy.ops.object.mode_set(mode='EDIT')
+
+    def _run(self, context, meshes, text, was_edit):
+        total_groups = 0
+        total_verts = 0
+        scoped = False
+        for obj in meshes:
+            doomed = [vg for vg in obj.vertex_groups if text in vg.name.lower()]
+            if not doomed:
+                continue
+            # Edit Mode + selected verts: only those verts lose the matching weights
+            # (the groups themselves stay); otherwise the groups are deleted outright.
+            sel = {v.index for v in obj.data.vertices if v.select} if was_edit else set()
+            sel_only = bool(sel)
+            scoped = scoped or sel_only
+            doomed_idx = {vg.index for vg in doomed}
+
+            # Groups that stay in play for renormalizing: the armature's deform
+            # bones when the mesh is rigged, otherwise every remaining group.
+            deform_names = set()
+            for mod in obj.modifiers:
+                if mod.type == 'ARMATURE' and mod.object is not None:
+                    deform_names |= {b.name for b in mod.object.data.bones
+                                     if b.use_deform}
+            keep = {vg.index: vg for vg in obj.vertex_groups
+                    if vg.index not in doomed_idx
+                    and (not deform_names or vg.name in deform_names)}
+
+            # Collect the affected vertices' remaining weights BEFORE removal
+            # (removing a group shifts the indices of the ones after it).
+            fixes = []   # (vert_index, [(group_name, weight), ...])
+            for v in obj.data.vertices:
+                if sel_only and v.index not in sel:
+                    continue
+                if not any(g.group in doomed_idx for g in v.groups):
+                    continue
+                rest = [(keep[g.group].name, g.weight) for g in v.groups
+                        if g.group in keep and g.weight > 0.0]
+                fixes.append((v.index, rest))
+
+            if sel_only:
+                fix_idx = [vi for vi, _ in fixes]
+                for vg in doomed:
+                    vg.remove(fix_idx)
+            else:
+                for vg in doomed:
+                    obj.vertex_groups.remove(vg)
+
+            for vi, rest in fixes:
+                total = sum(w for _, w in rest)
+                if total <= 0.0:
+                    continue
+                for name, w in rest:
+                    obj.vertex_groups[name].add([vi], w / total, 'REPLACE')
+
+            total_groups += len(doomed)
+            total_verts += len(fixes)
+            obj.data.update()
+
+        if total_groups == 0:
+            self.report({'INFO'}, f"No vertex groups contain '{text}'.")
+            return {'CANCELLED'}
+        what = "weights from selected verts" if scoped else "group(s)"
+        self.report({'INFO'}, f"Removed {total_groups} {what}; renormalized "
+                              f"{total_verts} vertice(s).")
+        return {'FINISHED'}
+
+
+# ============================================================================
 # Registration
 # ============================================================================
 
 classes = [
     ARANTOOLS_PG_AutoWeights,
     ARANTOOLS_OT_AutoWeightsSelected,
+    ARANTOOLS_OT_RemoveWeightGroups,
 ]
 
 
