@@ -406,6 +406,12 @@ def simulate(guide_obj, state):
     rest_len = np.linalg.norm(rest[e1] - rest[e0], axis=1)
     degree = np.maximum(np.bincount(edges.ravel(), minlength=n), 1).astype(np.float64)[:, None]
 
+    # 0 = base (where the arrows start): pins and stiffness start at the attached end
+    obj_cache = fc._RUNTIME_CACHE.get(guide_obj.name) or {}
+    cards = [(r, False) for r in obj_cache.get("chain_ranges") or []] + \
+        [(r, True) for r in obj_cache.get("mirror_ranges") or []]
+    mw = np.array(out_obj.matrix_world)
+    vert_t = fc.base_oriented_t(guide_obj, rest @ mw[:3, :3].T + mw[:3, 3], vert_t, cards)
     t = np.clip(vert_t, 0.0, 1.0)
     pinned = (t < s.pin_length) if s.pin_base else np.zeros(n, dtype=bool)
     # Only visible feathers are simulated; hidden ones stay put but still act as obstacles

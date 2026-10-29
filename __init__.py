@@ -34,6 +34,8 @@ from . import feather_cards
 _importlib.reload(feather_cards)
 from . import feather_overlaps
 _importlib.reload(feather_overlaps)
+from . import feather_rig
+_importlib.reload(feather_rig)
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -2371,6 +2373,7 @@ def register():
     tree_retopo.register()
     feather_cards.register()
     feather_overlaps.register()
+    feather_rig.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -2424,6 +2427,7 @@ def unregister():
         except Exception:
             pass
     for _mod in (
+        feather_rig,
         feather_overlaps,
         feather_cards,
         tree_retopo,
