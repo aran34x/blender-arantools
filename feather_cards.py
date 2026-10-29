@@ -2314,6 +2314,11 @@ class ARANTOOLS_PG_FeatherSceneUI(PropertyGroup):
         name="Extra Vertex Attributes",
         default=True,
     )
+    convert_source_collection: PointerProperty(
+        name="Source Collection",
+        description="Collection holding the Geonodes feather objects to convert into a new Feather Object",
+        type=bpy.types.Collection,
+    )
     edge_mesh_obj: PointerProperty(
         name="Feather Mesh",
         description="Select the 3D feather card mesh for the selected feather(s)",
@@ -3010,8 +3015,9 @@ class ARANTOOLS_OT_feather_convert_scene(Operator):
     )
 
     def invoke(self, context, event):
-        if not self.source_collection and context.collection is not None:
-            self.source_collection = context.collection.name
+        # Collection already picked in the panel -> run straight away; otherwise ask for one.
+        if self.source_collection in bpy.data.collections:
+            return self.execute(context)
         return context.window_manager.invoke_props_dialog(self)
 
     def draw(self, context):
@@ -4907,13 +4913,17 @@ def draw_feather_cards_ui(layout, context):
         scol = setup_box.column(align=True)
         scol.label(text="Feather Object Setup", icon='STRANDS')
         scol.separator(factor=0.4)
+        scol.prop(ui, "convert_source_collection", text="", icon='OUTLINER_COLLECTION')
         row = scol.row(align=True)
         row.scale_y = 1.3
-        row.operator(
+        row.enabled = ui.convert_source_collection is not None
+        op = row.operator(
             "arantools.feather_convert_scene",
             text="Convert Feather Collection",
             icon='MOD_PARTICLES',
         )
+        if ui.convert_source_collection is not None:
+            op.source_collection = ui.convert_source_collection.name
         scol.separator(factor=0.3)
         scol.operator(
             "arantools.feather_create_object",
@@ -5217,11 +5227,16 @@ def draw_feather_cards_ui(layout, context):
         ccol = conv_box.column(align=True)
         ccol.label(text="Scene Setup", icon='COLLECTION_NEW')
         ccol.separator(factor=0.3)
-        ccol.operator(
+        ccol.prop(ui, "convert_source_collection", text="", icon='OUTLINER_COLLECTION')
+        crow = ccol.row(align=True)
+        crow.enabled = ui.convert_source_collection is not None
+        cop = crow.operator(
             "arantools.feather_convert_scene",
             text="Convert Feather Collection",
             icon='MOD_PARTICLES',
         )
+        if ui.convert_source_collection is not None:
+            cop.source_collection = ui.convert_source_collection.name
         ccol.operator(
             "arantools.feather_create_object",
             text="New Custom Feather Object",
