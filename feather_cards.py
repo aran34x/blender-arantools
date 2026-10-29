@@ -110,6 +110,8 @@ _LAST_SELECTION_SIGNATURE = None
 _DRAW_HANDLER = None
 _ADDON_KEYMAPS = []
 _FEATHER_PICK_MODAL_ACTIVE = False
+# Bumped on every picker invoke; older modal instances see a stale generation and exit themselves.
+_FEATHER_PICK_MODAL_GEN = 0
 _HOVERED_CHAIN_INDEX = -1
 _HOVERED_GUIDE_NAME = ""
 
@@ -1443,7 +1445,7 @@ def regenerate_feather_object(guide_obj, force_full_rebuild=False, coords_only_h
         obj_cache["gpu_batches"] = None
 
         view_mode = getattr(fprops, "view_mode", 'MATERIAL')
-        base_mat = fprops.material or bpy.data.materials.get("Spirit.001")
+        base_mat = fprops.material
         if view_mode in ('UV_CHECKER', 'UV_GRADIENT', 'FEATHER_ID', 'XRAY'):
             active_mat = _get_or_create_uv_preview_material(view_mode) or base_mat
         else:
@@ -1558,7 +1560,7 @@ def regenerate_feather_object(guide_obj, force_full_rebuild=False, coords_only_h
             mmod.use_axis = (True, False, False)
             mmod.use_bisect_axis = (True, False, False)
             mmod.use_bisect_flip_axis = (False, False, False)
-            mmod.mirror_object = fprops.mirror_object or bpy.data.objects.get("Plane.086")
+            mmod.mirror_object = fprops.mirror_object
             mmod.use_mirror_merge = True
             mmod.merge_threshold = 0.001
             mmod.show_viewport = True
@@ -1620,13 +1622,11 @@ def _get_collection_feather_meshes(coll, fprops):
         o for o in coll.all_objects
         if _poll_mesh_object(fprops, o) and len(o.data.polygons) > 0
     ]
-    # If the user picked a shared collection (like 'Matteo') that also contains 'BODY_Retopo'/'Eyes',
-    # prioritize the feather card meshes if any exist, otherwise include all valid meshes in the collection.
-    feather_named = [
-        o for o in candidates
-        if o.name not in ("BODY_Retopo", "Eyes", "Plane")
-    ]
-    result = feather_named if feather_named else candidates
+    # If the user picked a shared collection that also holds this guide's surface / mirror objects,
+    # leave those out (identified by the guide's own pointers, never by object name).
+    excluded = {fprops.surface_object, fprops.mirror_object} - {None}
+    filtered = [o for o in candidates if o not in excluded]
+    result = filtered if filtered else candidates
     return sorted(result, key=lambda o: o.name)
 
 
@@ -1648,38 +1648,30 @@ def sync_admitted_collection_to_slots(guide_obj):
 
 
 def ensure_default_admitted_collection(guide_obj):
-    """Create or assign the default `Admitted_Feathers` collection if `admitted_collection` is unset."""
+    """Create a per-guide admitted collection if `admitted_collection` is unset.
+
+    Each Feather Object gets its own collection (never shared by name between guides), seeded only
+    from that guide's existing mesh slots.
+    """
     if guide_obj is None:
         return
     fprops = guide_obj.arantools_feather
     if fprops.admitted_collection is None:
-        coll_name = "Admitted_Feathers"
-        coll = bpy.data.collections.get(coll_name)
-        if coll is None:
-            coll = bpy.data.collections.new(coll_name)
-            if bpy.context.scene and coll.name not in bpy.context.scene.collection.children:
-                bpy.context.scene.collection.children.link(coll)
-            # Hide the source card collection in the viewport so origin cards stay hidden
-            try:
-                vl = bpy.context.view_layer
-                if vl and coll.name in vl.layer_collection.children:
-                    vl.layer_collection.children[coll.name].hide_viewport = True
-            except Exception:
-                pass
+        coll = bpy.data.collections.new(f"{guide_obj.name}_Admitted")
+        if bpy.context.scene and coll.name not in bpy.context.scene.collection.children:
+            bpy.context.scene.collection.children.link(coll)
+        # Hide the source card collection in the viewport so origin cards stay hidden
+        try:
+            vl = bpy.context.view_layer
+            if vl and coll.name in vl.layer_collection.children:
+                vl.layer_collection.children[coll.name].hide_viewport = True
+        except Exception:
+            pass
 
-        # Populate with existing slot meshes and/or scene LP feather card meshes
         seed_meshes = []
         for s in fprops.mesh_slots:
             if s.mesh_obj is not None and s.mesh_obj not in seed_meshes:
                 seed_meshes.append(s.mesh_obj)
-        for o in sorted(bpy.data.objects, key=lambda x: x.name):
-            if (
-                o.type == 'MESH'
-                and o.name.startswith("Feather_")
-                and o.name.endswith("_LP")
-                and o not in seed_meshes
-            ):
-                seed_meshes.append(o)
 
         for mobj in seed_meshes:
             if mobj.name not in coll.objects:
@@ -2784,50 +2776,36 @@ def bake_feather_parameters_to_vertices(
 
 
 # ============================================================================
-# Conversion Logic (Substitute Scene Feathers -> ARANFEATHERS)
+# Conversion Logic (Geonodes feather collection -> new Feather Object)
 # ============================================================================
 
 def convert_scene_feathers_to_aranfeathers(
-    source_collection_name="Feathers",
-    target_collection_name="ARANFEATHERS",
-    unified_object_name="AranFeathers",
+    src_coll,
     hide_source_collection=True,
     bake_parameters_on_convert=False,
 ):
-    """Convert all Geonodes feather objects in `Feathers` into the new pure-Python Feather Object
-    inside the `ARANFEATHERS` collection while maintaining the original `Feathers` collection intact.
+    """Convert the Geonodes feather objects in `src_coll` into a NEW pure-Python Feather Object
+    inside a new `<src>_AranFeathers` collection, leaving `src_coll` and every existing Feather
+    Object in the file untouched.
     """
-    src_coll = bpy.data.collections.get(source_collection_name)
     if src_coll is None:
-        raise RuntimeError(f"Collection '{source_collection_name}' not found in scene.")
+        raise RuntimeError("No source collection given.")
 
     src_objects = sorted(
-        [o for o in src_coll.objects if o.type == 'MESH'],
+        [
+            o for o in src_coll.objects
+            if o.type == 'MESH'
+            and not o.arantools_feather.is_feather_guide
+            and not o.arantools_feather.is_feather_output
+        ],
         key=lambda o: o.name,
     )
     if not src_objects:
-        raise RuntimeError(f"No mesh objects found in '{source_collection_name}'.")
+        raise RuntimeError(f"No mesh objects found in '{src_coll.name}'.")
 
-    target_coll = bpy.data.collections.get(target_collection_name)
-    if target_coll is None:
-        target_coll = bpy.data.collections.new(target_collection_name)
-    if target_coll.name not in bpy.context.scene.collection.children:
-        bpy.context.scene.collection.children.link(target_coll)
-
-    for old_obj in list(bpy.data.objects):
-        if (
-            getattr(old_obj, "arantools_feather", None) and (
-                old_obj.arantools_feather.is_feather_guide
-                or old_obj.arantools_feather.is_feather_output
-            )
-            or old_obj.name.startswith(unified_object_name)
-        ):
-            old_data = old_obj.data
-            bpy.data.objects.remove(old_obj, do_unlink=True)
-            if old_data and old_data.users == 0 and isinstance(old_data, bpy.types.Mesh):
-                bpy.data.meshes.remove(old_data)
-
-    invalidate_feather_cache()
+    unified_object_name = f"{src_coll.name}_AranFeathers"
+    target_coll = bpy.data.collections.new(unified_object_name)
+    bpy.context.scene.collection.children.link(target_coll)
 
     guide_mesh = bpy.data.meshes.new(f"{unified_object_name}_GuideMesh")
     guide_obj = bpy.data.objects.new(unified_object_name, guide_mesh)
@@ -2848,17 +2826,11 @@ def convert_scene_feathers_to_aranfeathers(
                 detected_blur_src = int(gn_m.get("Socket_19", 0))
         if detected_mat is None and s_obj.active_material is not None:
             detected_mat = s_obj.active_material
-    if detected_mat is None:
-        detected_mat = bpy.data.materials.get("Spirit.001")
-    if detected_surf_obj is None:
-        detected_surf_obj = bpy.data.objects.get("BODY_Retopo")
-
     fprops = guide_obj.arantools_feather
     fprops.is_feather_guide = True
     fprops.deform_axis = '1'
     fprops.invert_curve_profile = False
     fprops.use_mirror = True
-    fprops.mirror_object = bpy.data.objects.get("Plane.086")
     fprops.surface_object = detected_surf_obj
     fprops.blur_source_mesh = detected_blur_src
     fprops.material = detected_mat
@@ -2895,8 +2867,8 @@ def convert_scene_feathers_to_aranfeathers(
             smooth_tilt_iters = int(gn_mod.get("Socket_18", 30))
             smooth_spline_iters = int(gn_mod.get("Socket_20", 100))
         else:
-            mesh1_obj = bpy.data.objects.get("Feather_Body_LP")
-            mesh2_obj = bpy.data.objects.get("Feather_Tail_LP")
+            mesh1_obj = None
+            mesh2_obj = None
             curve_subdiv = 2
             base_radius = 0.0
             radius_mult = 1.0
@@ -2994,16 +2966,16 @@ def convert_scene_feathers_to_aranfeathers(
     out_obj = regenerate_feather_object(guide_obj, force_full_rebuild=True)
 
     if hide_source_collection:
-        def _find_layer_coll(layer_coll, name):
-            if layer_coll.name == name:
+        def _find_layer_coll(layer_coll, coll):
+            if layer_coll.collection == coll:
                 return layer_coll
             for child in layer_coll.children:
-                found = _find_layer_coll(child, name)
+                found = _find_layer_coll(child, coll)
                 if found is not None:
                     return found
             return None
 
-        lc = _find_layer_coll(bpy.context.view_layer.layer_collection, source_collection_name)
+        lc = _find_layer_coll(bpy.context.view_layer.layer_collection, src_coll)
         if lc is not None:
             lc.hide_viewport = True
 
@@ -3016,15 +2988,19 @@ def convert_scene_feathers_to_aranfeathers(
 
 class ARANTOOLS_OT_feather_convert_scene(Operator):
     bl_idname = "arantools.feather_convert_scene"
-    bl_label = "Substitute Scene Feathers -> ARANFEATHERS"
+    bl_label = "Convert Feather Collection"
     bl_description = (
-        "Convert all feathers in the 'Feathers' collection into our new pure-Python "
-        "Feather Object inside the 'ARANFEATHERS' collection while keeping 'Feathers' intact"
+        "Convert the Geonodes feathers in a chosen collection into a NEW Feather Object. "
+        "The source collection and any existing Feather Objects are left untouched"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
+    source_collection: StringProperty(
+        name="Source Collection",
+        description="Collection holding the Geonodes feather objects to convert",
+    )
     hide_original: BoolProperty(
-        name="Hide Original 'Feathers' Collection",
+        name="Hide Source Collection",
         default=True,
     )
     bake_parameters: BoolProperty(
@@ -3033,12 +3009,25 @@ class ARANTOOLS_OT_feather_convert_scene(Operator):
         default=False,
     )
 
+    def invoke(self, context, event):
+        if not self.source_collection and context.collection is not None:
+            self.source_collection = context.collection.name
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop_search(self, "source_collection", bpy.data, "collections")
+        col.prop(self, "hide_original")
+        col.prop(self, "bake_parameters")
+
     def execute(self, context):
+        src_coll = bpy.data.collections.get(self.source_collection)
+        if src_coll is None:
+            self.report({'ERROR'}, "Pick a source collection to convert.")
+            return {'CANCELLED'}
         try:
             guide_obj, out_obj = convert_scene_feathers_to_aranfeathers(
-                source_collection_name="Feathers",
-                target_collection_name="ARANFEATHERS",
-                unified_object_name="AranFeathers",
+                src_coll,
                 hide_source_collection=self.hide_original,
                 bake_parameters_on_convert=self.bake_parameters,
             )
@@ -3055,7 +3044,7 @@ class ARANTOOLS_OT_feather_convert_scene(Operator):
         n_polys = len(out_obj.data.polygons) if out_obj and out_obj.data else 0
         self.report(
             {'INFO'},
-            f"Created '{guide_obj.name}' + '{out_obj.name}' ({n_polys} base polys) in ARANFEATHERS.",
+            f"Created '{guide_obj.name}' + '{out_obj.name}' ({n_polys} base polys) from '{src_coll.name}'.",
         )
         return {'FINISHED'}
 
@@ -3271,8 +3260,12 @@ def _find_view3d_region_at_mouse(context, event):
 
 
 def _get_mirror_reflection_matrix(fprops):
-    """Return the 4x4 world-space reflection matrix across `mirror_object` local X plane."""
-    m_obj = fprops.mirror_object or bpy.data.objects.get("Plane.086")
+    """Return the 4x4 world-space reflection matrix across `mirror_object` local X plane.
+
+    Without a mirror object the Mirror modifier reflects across the output object's own local X,
+    so match that instead of assuming world origin.
+    """
+    m_obj = fprops.mirror_object or fprops.output_object
     if m_obj is not None:
         mw_m = m_obj.matrix_world
         return mw_m @ Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0)) @ mw_m.inverted_safe()
@@ -3304,7 +3297,7 @@ def _pick_feather_chain_at_mouse(context, event, guide_obj):
     # 0. Depth Occlusion Check against the Bird Body (`surface_object`) so back-facing feathers
     #    on the far side of the bird are NEVER picked through the body!
     max_depth = 1e30
-    surf_obj = fprops.surface_object or bpy.data.objects.get("BODY_Retopo")
+    surf_obj = fprops.surface_object
     if surf_obj is not None and surf_obj.type == 'MESH' and surf_obj.data is not None and len(surf_obj.data.polygons) > 0:
         s_inv = surf_obj.matrix_world.inverted_safe()
         s_orig = s_inv @ ray_origin
@@ -3474,7 +3467,7 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
         return self.invoke(context, None)
 
     def invoke(self, context, event):
-        global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX, _HOVERED_GUIDE_NAME
+        global _FEATHER_PICK_MODAL_ACTIVE, _FEATHER_PICK_MODAL_GEN, _HOVERED_CHAIN_INDEX, _HOVERED_GUIDE_NAME
         guide_obj = get_feather_guide_from_context(context)
         if guide_obj is None:
             return {'CANCELLED'}
@@ -3508,9 +3501,13 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
         _HOVERED_GUIDE_NAME = guide_obj.name
         _HOVERED_CHAIN_INDEX = -1
 
-        if _FEATHER_PICK_MODAL_ACTIVE or bpy.app.background or event is None or context.window is None:
+        if bpy.app.background or event is None or context.window is None:
             return {'FINISHED'}
 
+        # Always start a fresh picker: a stale `_FEATHER_PICK_MODAL_ACTIVE` (e.g. after a file load killed
+        # the old handler) must never block it, and any older instance retires itself via the generation.
+        _FEATHER_PICK_MODAL_GEN += 1
+        self._gen = _FEATHER_PICK_MODAL_GEN
         _FEATHER_PICK_MODAL_ACTIVE = True
         context.window_manager.modal_handler_add(self)
         for area in context.screen.areas if context.screen else []:
@@ -3526,6 +3523,11 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
 
     def modal(self, context, event):
         global _FEATHER_PICK_MODAL_ACTIVE, _HOVERED_CHAIN_INDEX, _HOVERED_GUIDE_NAME
+        # A newer picker owns the globals now -> exit quietly. (PASS_THROUGH alone would keep this
+        # handler alive as a zombie, so always combine it with CANCELLED/FINISHED.)
+        if getattr(self, "_gen", -1) != _FEATHER_PICK_MODAL_GEN:
+            return {'CANCELLED', 'PASS_THROUGH'}
+
         guide_obj = get_feather_guide_from_context(context)
         if (
             not _FEATHER_PICK_MODAL_ACTIVE
@@ -3534,7 +3536,7 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
             or guide_obj.arantools_feather.feather_submode != 'FEATHER_SELECT'
         ):
             self._finish(context)
-            return {'PASS_THROUGH'}
+            return {'CANCELLED', 'PASS_THROUGH'}
 
         # Keyboard shortcuts inside Feathers Mode (only when cursor is in 3D Viewport)
         v_area, v_reg, _, _ = _find_view3d_region_at_mouse(context, event)
@@ -3580,7 +3582,8 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
                         area.tag_redraw()
             return {'PASS_THROUGH'}
 
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and not event.alt and not event.ctrl:
+        # DOUBLE_CLICK counts as a press so fast consecutive (Shift+)clicks aren't dropped.
+        if event.type == 'LEFTMOUSE' and event.value in {'PRESS', 'DOUBLE_CLICK'} and not event.alt and not event.ctrl:
             c_idx = _pick_feather_chain_at_mouse(context, event, guide_obj)
             cur_sel = set(_get_selected_chain_indices(guide_obj))
             if c_idx >= 0:
@@ -3597,6 +3600,11 @@ class ARANTOOLS_OT_feather_select_modal(Operator):
                     _set_selected_chain_indices(guide_obj, [], isolate_in_edit=False, context=context)
             for area in context.screen.areas if context.screen else []:
                 area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        # Swallow the rest of the left-click (RELEASE / CLICK / CLICK_DRAG) so Blender's own
+        # view3d.select / box-select never runs after our pick and steals the active object.
+        if event.type == 'LEFTMOUSE' and not event.alt and not event.ctrl:
             return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
@@ -4485,7 +4493,7 @@ class ARANTOOLS_OT_feather_create_object(Operator):
 
     def execute(self, context):
         ui = context.scene.arantools_feather_ui
-        target_coll = bpy.data.collections.get("ARANFEATHERS") or context.collection
+        target_coll = context.collection
 
         obj = context.active_object
         if obj is not None and obj.type == 'MESH' and len(obj.data.polygons) == 0 and not obj.arantools_feather.is_feather_guide:
@@ -4495,21 +4503,15 @@ class ARANTOOLS_OT_feather_create_object(Operator):
             guide_obj = bpy.data.objects.new("AranFeather", mesh)
             target_coll.objects.link(guide_obj)
 
+        # Material / mirror / surface are left for the artist to set per Feather Object.
         guide_obj.show_in_front = True
         fprops = guide_obj.arantools_feather
         fprops.is_feather_guide = True
-        fprops.material = bpy.data.materials.get("Spirit.001")
-        fprops.mirror_object = bpy.data.objects.get("Plane.086")
-        fprops.surface_object = bpy.data.objects.get("BODY_Retopo")
+
+        if ui.edge_mesh_obj is not None:
+            find_or_add_mesh_slot(guide_obj, ui.edge_mesh_obj)
 
         ensure_default_admitted_collection(guide_obj)
-
-        default_mesh = ui.edge_mesh_obj or bpy.data.objects.get("Feather_Body_01_LP") or bpy.data.objects.get("Feather_Body_LP")
-        if default_mesh is not None:
-            find_or_add_mesh_slot(guide_obj, default_mesh)
-        tail_mesh = bpy.data.objects.get("Feather_Tail_01_LP") or bpy.data.objects.get("Feather_Tail_LP")
-        if tail_mesh is not None:
-            find_or_add_mesh_slot(guide_obj, tail_mesh)
 
         ensure_feather_guide_attributes(guide_obj.data)
         regenerate_feather_object(guide_obj, force_full_rebuild=True)
@@ -4909,7 +4911,7 @@ def draw_feather_cards_ui(layout, context):
         row.scale_y = 1.3
         row.operator(
             "arantools.feather_convert_scene",
-            text="Convert Scene Feathers",
+            text="Convert Feather Collection",
             icon='MOD_PARTICLES',
         )
         scol.separator(factor=0.3)
@@ -5217,7 +5219,7 @@ def draw_feather_cards_ui(layout, context):
         ccol.separator(factor=0.3)
         ccol.operator(
             "arantools.feather_convert_scene",
-            text="Substitute Feathers -> ARANFEATHERS",
+            text="Convert Feather Collection",
             icon='MOD_PARTICLES',
         )
         ccol.operator(
@@ -5313,33 +5315,8 @@ def _auto_setup_open_scene_timer():
                 scene.arantools_open_feather_cards = True
             except Exception:
                 pass
-
-            if "Feathers" in bpy.data.collections and "ARANFEATHERS" not in bpy.data.collections:
-                try:
-                    guide_obj, _ = convert_scene_feathers_to_aranfeathers(
-                        source_collection_name="Feathers",
-                        target_collection_name="ARANFEATHERS",
-                        unified_object_name="AranFeathers",
-                        hide_source_collection=True,
-                    )
-                    if guide_obj is not None and bpy.context.mode == 'OBJECT':
-                        for o in list(bpy.context.selected_objects):
-                            o.select_set(False)
-                        guide_obj.select_set(True)
-                        bpy.context.view_layer.objects.active = guide_obj
-                except Exception as exc:
-                    print(f"[AranTools] Auto-convert feathers warning: {exc}")
-            else:
-                for obj in bpy.data.objects:
-                    fprops = getattr(obj, "arantools_feather", None)
-                    if fprops is not None and fprops.is_feather_guide:
-                        if fprops.material is None:
-                            fprops.material = bpy.data.materials.get("Spirit.001")
-                        if fprops.surface_object is None:
-                            fprops.surface_object = bpy.data.objects.get("BODY_Retopo")
-                        ensure_default_admitted_collection(obj)
-                        ensure_feather_guide_attributes(obj.data)
-                        regenerate_feather_object(obj, force_full_rebuild=True)
+            # Reload never converts, creates, or regenerates feather data — runtime caches rebuild
+            # lazily on first use (draw handler / picker / edit).
 
         wm = getattr(bpy.context, "window_manager", None)
         if wm is not None:
