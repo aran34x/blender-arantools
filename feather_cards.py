@@ -71,6 +71,8 @@ EDGE_INT_ATTRS = (
     # Card choice for the internal mirror copy: <= 0 = same card as the original,
     # > 0 = bitmask of mesh slots (one bit = that card, several = random pick).
     ("feather_mirror_mask", 0),
+    # Selection-set membership bitmask (bit i = Feather Object set i)
+    ("feather_sets", 0),
 )
 
 EDGE_BOOL_ATTRS = (
@@ -1677,8 +1679,9 @@ def regenerate_feather_object(guide_obj, force_full_rebuild=False, coords_only_h
 
         obj_cache["topo_sig"] = topo_sig
         # A full rebuild wipes vertex weights: re-weight from the rig settings
-        from . import feather_rig  # late import: feather_rig imports this module
+        from . import feather_rig, feather_normals  # late import: they import this module
         feather_rig.reapply_after_regenerate(guide_obj)
+        feather_normals.reapply_after_regenerate(guide_obj)
         return out_obj
     finally:
         _IS_GENERATING = False
@@ -2002,9 +2005,11 @@ def sync_ui_from_selection(context):
 
 
 def _sync_rig_ui(context):
+    """Per-feather panel proxies (Rig, Normals) follow the selection / picks."""
     try:
-        from . import feather_rig  # late import: feather_rig imports this module
+        from . import feather_rig, feather_normals  # late import: they import this module
         feather_rig.sync_rig_ui(context)
+        feather_normals.sync_normals_ui(context)
     except Exception:
         pass
 
@@ -2378,6 +2383,19 @@ class ARANTOOLS_PG_FeatherMeshSlot(PropertyGroup):
     )
 
 
+class ARANTOOLS_PG_FeatherSet(PropertyGroup):
+    name: StringProperty(name="Name", default="Set")
+    color: FloatVectorProperty(
+        name="Color", subtype='COLOR_GAMMA', size=4, min=0.0, max=1.0, default=(0.95, 0.55, 0.2, 1.0),
+        update=lambda self, context: _redraw_views(context),
+        description="Tint of this set's feathers in Feather Select",
+    )
+    show: BoolProperty(
+        name="Show", default=True, update=lambda self, context: _redraw_views(context),
+        description="Tint this set's feathers in Feather Select",
+    )
+
+
 class ARANTOOLS_PG_FeatherObject(PropertyGroup):
     is_feather_guide: BoolProperty(
         name="Is Feather Guide",
@@ -2395,6 +2413,8 @@ class ARANTOOLS_PG_FeatherObject(PropertyGroup):
         name="Generated Feather Mesh",
         type=bpy.types.Object,
     )
+    feather_sets: CollectionProperty(type=ARANTOOLS_PG_FeatherSet, name="Selection Sets")
+    active_set_index: IntProperty(name="Active Set", default=0)
     mesh_slots: CollectionProperty(
         name="Feather Mesh Slots",
         type=ARANTOOLS_PG_FeatherMeshSlot,
@@ -2513,6 +2533,7 @@ class ARANTOOLS_PG_FeatherSceneUI(PropertyGroup):
             ('CONTROLS', "Controls", "Primary controls for the current Feather Mode"),
             ('ADVANCED', "Advanced", "Surface projection, baking, mirror, and scene setup settings"),
             ('RIG', "Rig", "Weight the feathers to a rig: bone chains or the body mesh"),
+            ('NORMALS', "Normals", "Feather normals transferred from a mesh, per feather (base / middle / tip)"),
         ],
         default='CONTROLS',
     )
@@ -3927,18 +3948,19 @@ class ARANTOOLS_OT_feather_pick(Operator):
     bl_idname = "arantools.feather_pick"
     bl_label = "Pick Feather"
     bl_description = (
-        "Click: edit the feather under the mouse (isolates it and returns to Vertices / Splines). "
-        "Shift = add/remove from selection, Ctrl = deselect"
+        "Click: pick the feather under the mouse. Shift = add / remove it. "
+        "Ctrl = isolate it and edit it (back to Vertices / Splines)"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     mode: EnumProperty(
         items=[
+            ('SET', "Pick", "Pick only the clicked feather and stay in Feather Select"),
             ('EDIT', "Edit", "Isolate the clicked feather and return to the previous level to edit it"),
             ('TOGGLE', "Toggle", "Add / remove the clicked feather, stay in Feather Select"),
-            ('SUB', "Subtract", "Deselect the clicked feather, stay in Feather Select"),
+            ('SUB', "Subtract", "Un-pick the clicked feather, stay in Feather Select"),
         ],
-        default='EDIT',
+        default='SET',
     )
 
     @classmethod
@@ -3952,13 +3974,15 @@ class ARANTOOLS_OT_feather_pick(Operator):
 
         if c_idx < 0:
             # Click on empty space: clear the picks, stay in Feather Select
-            if self.mode != 'EDIT':
+            if self.mode != 'SET':
                 return {'CANCELLED'}
             _set_picked(guide_obj, [], context)
             return {'FINISHED'}
 
         cur = set(get_picked_chains(guide_obj))
-        if self.mode == 'TOGGLE':
+        if self.mode == 'SET':
+            _set_picked(guide_obj, [c_idx], context)
+        elif self.mode == 'TOGGLE':
             _set_picked(guide_obj, cur ^ {c_idx}, context)
         elif self.mode == 'SUB':
             _set_picked(guide_obj, cur - {c_idx}, context)
@@ -4054,16 +4078,20 @@ def _feathers_in_rect(guide_obj, region, rv3d, rect):
     ranges = list(obj_cache.get("chain_ranges") or []) + list(obj_cache.get("mirror_ranges") or [])
     if not ranges:
         return set()
-    centres = np.array([pts[v0:v1].mean(0) if v1 > v0 else (0.0, 0.0, 0.0) for _, v0, v1, *_ in ranges])
+    # Any part of a card inside the box picks its feather (not just the card's centre)
     m = np.array(rv3d.perspective_matrix) @ np.array(out_obj.matrix_world)
-    h = np.c_[centres, np.ones(len(centres))] @ m.T
+    h = np.c_[pts, np.ones(len(pts))] @ m.T
     w = h[:, 3]
     front = w > 1e-9
     x = (h[:, 0] / np.where(front, w, 1.0) * 0.5 + 0.5) * region.width
     y = (h[:, 1] / np.where(front, w, 1.0) * 0.5 + 0.5) * region.height
     x0, y0, x1, y1 = min(rect[0], rect[2]), min(rect[1], rect[3]), max(rect[0], rect[2]), max(rect[1], rect[3])
     inside = front & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
-    return {ranges[i][0] for i in np.nonzero(inside)[0]}
+    hit = set()
+    for c_idx, v0, v1, *_ in ranges:
+        if inside[v0:v1].any():
+            hit.add(c_idx)
+    return hit
 
 
 _BOX = {"rect": None, "handle": None}
@@ -4167,26 +4195,273 @@ class ARANTOOLS_OT_feather_box_pick(Operator):
         return {'RUNNING_MODAL'}
 
 
+# ── Feather selection sets ──────────────────────────────────────────────────
+# Named, coloured sets per Feather Object. Membership is a bitmask per feather in the guide's
+# `feather_sets` edge attribute (bit i = set i), so it survives regeneration and Duplicate.
+
+_SET_PALETTE = (
+    (0.95, 0.55, 0.20, 1.0), (0.30, 0.75, 0.95, 1.0), (0.55, 0.90, 0.35, 1.0), (0.95, 0.40, 0.70, 1.0),
+    (0.95, 0.85, 0.30, 1.0), (0.60, 0.50, 0.95, 1.0), (0.35, 0.90, 0.80, 1.0), (0.90, 0.35, 0.35, 1.0),
+)
+MAX_FEATHER_SETS = 30
+
+
+def chain_set_masks(guide_obj):
+    """`feather_sets` bitmask per feather (from each feather's first edge)."""
+    chains = _get_guide_chains_fast(guide_obj)
+    first = [ec[0] if ec else 0 for _, ec in chains]
+    if not first:
+        return np.zeros(0, dtype=np.int64)
+    me = guide_obj.data
+    if guide_obj.mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(me)
+        lyr = bm.edges.layers.int.get("feather_sets")
+        if lyr is None:
+            return np.zeros(len(first), dtype=np.int64)
+        bm.edges.ensure_lookup_table()
+        return np.array([bm.edges[ei][lyr] if ei < len(bm.edges) else 0 for ei in first], dtype=np.int64)
+    attr = me.attributes.get("feather_sets")
+    if attr is None:
+        return np.zeros(len(first), dtype=np.int64)
+    vals = np.empty(len(me.edges), dtype=np.int32)
+    attr.data.foreach_get("value", vals)
+    return vals[np.array(first)].astype(np.int64)
+
+
+def _edit_chain_set_masks(guide_obj, chain_ids, fn):
+    """Set every edge of the given feathers to `fn(old_mask)`."""
+    chains = _get_guide_chains_fast(guide_obj)
+    edge_ids = [ei for ci in chain_ids if 0 <= ci < len(chains) for ei in chains[ci][1]]
+    if not edge_ids:
+        return
+    me = guide_obj.data
+    if guide_obj.mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(me)
+        lyr = bm.edges.layers.int.get("feather_sets") or bm.edges.layers.int.new("feather_sets")
+        bm.edges.ensure_lookup_table()
+        for ei in edge_ids:
+            bm.edges[ei][lyr] = fn(int(bm.edges[ei][lyr]))
+        bmesh.update_edit_mesh(me, loop_triangles=False, destructive=False)
+    else:
+        attr = me.attributes.get("feather_sets") or me.attributes.new("feather_sets", 'INT', 'EDGE')
+        for ei in edge_ids:
+            attr.data[ei].value = fn(int(attr.data[ei].value))
+    obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+    if obj_cache is not None:
+        obj_cache["unpicked_fill"] = None
+
+
+def _set_targets(context, guide_obj):
+    """Feathers set operations act on: the picks in Feather Select, else the selected feathers."""
+    if is_in_feather_mode(guide_obj) and get_feather_level(context) == 'FEATHER':
+        return get_picked_chains(guide_obj)
+    return _get_selected_chain_indices(guide_obj)
+
+
+def _redraw_views(context):
+    for area in context.screen.areas if context.screen else []:
+        if area.type in {'VIEW_3D', 'PROPERTIES'}:
+            area.tag_redraw()
+
+
+class ARANTOOLS_OT_feather_set_new(Operator):
+    bl_idname = "arantools.feather_set_new"
+    bl_label = "New Selection Set"
+    bl_description = "Add a new named, coloured feather selection set (and put the picked feathers in it)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        g = get_feather_guide_from_context(context)
+        return g is not None and len(g.arantools_feather.feather_sets) < MAX_FEATHER_SETS
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        sets = guide_obj.arantools_feather.feather_sets
+        item = sets.add()
+        item.name = f"Set {len(sets)}"
+        item.color = _SET_PALETTE[(len(sets) - 1) % len(_SET_PALETTE)]
+        guide_obj.arantools_feather.active_set_index = len(sets) - 1
+        bit = 1 << (len(sets) - 1)
+        targets = _set_targets(context, guide_obj)
+        if targets:
+            _edit_chain_set_masks(guide_obj, targets, lambda m: m | bit)
+        _redraw_views(context)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_set_delete(Operator):
+    bl_idname = "arantools.feather_set_delete"
+    bl_label = "Delete Selection Set"
+    bl_description = "Delete the active selection set (the feathers themselves are kept)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        g = get_feather_guide_from_context(context)
+        return g is not None and 0 <= g.arantools_feather.active_set_index < len(g.arantools_feather.feather_sets)
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        fprops = guide_obj.arantools_feather
+        i = fprops.active_set_index
+        low = (1 << i) - 1
+        # Drop bit i and shift the later sets' bits down to keep indices matching the list
+        _edit_chain_set_masks(
+            guide_obj, list(range(len(_get_guide_chains_fast(guide_obj)))),
+            lambda m: (m & low) | ((m >> (i + 1)) << i),
+        )
+        fprops.feather_sets.remove(i)
+        fprops.active_set_index = min(i, len(fprops.feather_sets) - 1)
+        _redraw_views(context)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_set_assign(Operator):
+    bl_idname = "arantools.feather_set_assign"
+    bl_label = "Add / Remove from Selection Set"
+    bl_description = "Add the picked / selected feathers to the active set, or remove them from it"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: EnumProperty(items=[('ADD', "Add", ""), ('REMOVE', "Remove", "")], default='ADD')
+
+    @classmethod
+    def poll(cls, context):
+        g = get_feather_guide_from_context(context)
+        return g is not None and 0 <= g.arantools_feather.active_set_index < len(g.arantools_feather.feather_sets)
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        targets = _set_targets(context, guide_obj)
+        if not targets:
+            self.report({'WARNING'}, "Pick or select feathers first.")
+            return {'CANCELLED'}
+        bit = 1 << guide_obj.arantools_feather.active_set_index
+        if self.action == 'ADD':
+            _edit_chain_set_masks(guide_obj, targets, lambda m: m | bit)
+        else:
+            _edit_chain_set_masks(guide_obj, targets, lambda m: m & ~bit)
+        _redraw_views(context)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_set_select(Operator):
+    bl_idname = "arantools.feather_set_select"
+    bl_label = "Select Set"
+    bl_description = "Pick the active set's feathers (Shift: add to the current picks)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    extend: BoolProperty(default=False, options={'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        g = get_feather_guide_from_context(context)
+        return g is not None and 0 <= g.arantools_feather.active_set_index < len(g.arantools_feather.feather_sets)
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        bit = 1 << guide_obj.arantools_feather.active_set_index
+        members = [int(c) for c in np.nonzero(chain_set_masks(guide_obj) & bit)[0]]
+        if is_in_feather_mode(guide_obj) and get_feather_level(context) != 'FEATHER':
+            cur = set(_get_selected_chain_indices(guide_obj)) if self.extend else set()
+            _set_chains_hidden(guide_obj, [])
+            _set_selected_chain_indices(guide_obj, sorted(cur | set(members)), context=context)
+        else:
+            if not (is_in_feather_mode(guide_obj) and get_feather_level(context) == 'FEATHER'):
+                _set_feather_level(context, guide_obj, 'FEATHER')
+            cur = set(get_picked_chains(guide_obj)) if self.extend else set()
+            _set_picked(guide_obj, cur | set(members), context)
+        _redraw_views(context)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_OT_feather_pick_all(Operator):
+    bl_idname = "arantools.feather_pick_all"
+    bl_label = "Pick All Feathers"
+    bl_description = "Pick every feather (Ctrl+A in Feather Select)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        g = get_feather_guide_from_context(context)
+        return is_in_feather_mode(g) and get_feather_level(context) == 'FEATHER'
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        _set_picked(guide_obj, range(len(_get_guide_chains_fast(guide_obj))), context)
+        return {'FINISHED'}
+
+
+class ARANTOOLS_UL_FeatherSets(UIList):
+    bl_idname = "ARANTOOLS_UL_FeatherSets"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        swatch = row.row(align=True)
+        swatch.ui_units_x = 1.2
+        swatch.prop(item, "color", text="")
+        row.prop(item, "name", text="", emboss=False)
+        count = _SET_COUNTS.get(index, 0)
+        sub = row.row(align=True)
+        sub.alignment = 'RIGHT'
+        sub.enabled = False
+        sub.label(text=str(count))
+        row.prop(item, "show", text="", emboss=False, icon='HIDE_OFF' if item.show else 'HIDE_ON')
+
+
+_SET_COUNTS = {}
+
+
+def draw_selection_sets(layout, context, guide_obj):
+    """Selection Sets section: list + New / Delete / Add / Remove / Select."""
+    fprops = guide_obj.arantools_feather
+    masks = chain_set_masks(guide_obj)
+    _SET_COUNTS.clear()
+    for i in range(len(fprops.feather_sets)):
+        _SET_COUNTS[i] = int(((masks >> i) & 1).sum()) if len(masks) else 0
+
+    box = layout.box()
+    col = box.column(align=True)
+    col.label(text="Selection Sets", icon='GROUP')
+    row = col.row()
+    row.template_list("ARANTOOLS_UL_FeatherSets", "", fprops, "feather_sets", fprops, "active_set_index", rows=3)
+    side = row.column(align=True)
+    side.operator("arantools.feather_set_new", text="", icon='ADD')
+    side.operator("arantools.feather_set_delete", text="", icon='REMOVE')
+    if not len(fprops.feather_sets):
+        return
+    col.separator(factor=0.3)
+    ops = col.row(align=True)
+    ops.operator("arantools.feather_set_assign", text="Add", icon='ADD').action = 'ADD'
+    ops.operator("arantools.feather_set_assign", text="Remove", icon='REMOVE').action = 'REMOVE'
+    ops.operator("arantools.feather_set_select", text="Select", icon='RESTRICT_SELECT_OFF')
+
+
 class ARANTOOLS_TL_feather_select(bpy.types.WorkSpaceTool):
     bl_space_type = 'VIEW_3D'
     bl_context_mode = 'EDIT_MESH'
     bl_idname = FEATHER_TOOL_ID
     bl_label = "Feather Select"
     bl_description = (
-        "Feather Mode: hover a feather to highlight it, click to edit just that feather\n"
-        "(back to Vertices / Splines). Shift+Click or drag a box to pick several — then Confirm (Enter)\n"
-        "or Cancel (Esc). Shift+drag adds, Ctrl+Click / Ctrl+drag un-picks"
+        "Feather Mode: hover a feather to highlight it. Click picks it, Shift+Click adds / removes,\n"
+        "drag a box to pick several (Shift adds, Ctrl removes), Ctrl+A picks all.\n"
+        "Ctrl+Click isolates a feather and edits it; Enter / Confirm edits the picks, Esc clears them"
     )
     bl_icon = "ops.generic.select"
     bl_widget = None
     bl_keymap = (
         ("arantools.feather_hover", {"type": 'MOUSEMOVE', "value": 'ANY', "any": True}, None),
         ("arantools.feather_pick", {"type": 'LEFTMOUSE', "value": 'CLICK'},
-         {"properties": [("mode", 'EDIT')]}),
+         {"properties": [("mode", 'SET')]}),
         ("arantools.feather_pick", {"type": 'LEFTMOUSE', "value": 'CLICK', "shift": True},
          {"properties": [("mode", 'TOGGLE')]}),
         ("arantools.feather_pick", {"type": 'LEFTMOUSE', "value": 'CLICK', "ctrl": True},
-         {"properties": [("mode", 'SUB')]}),
+         {"properties": [("mode", 'EDIT')]}),
+        ("arantools.feather_pick_all", {"type": 'A', "value": 'PRESS', "ctrl": True}, None),
         ("arantools.feather_box_pick", {"type": 'LEFTMOUSE', "value": 'CLICK_DRAG'},
          {"properties": [("mode", 'SET')]}),
         ("arantools.feather_box_pick", {"type": 'LEFTMOUSE', "value": 'CLICK_DRAG', "shift": True},
@@ -5297,7 +5572,7 @@ def _draw_feather_directions_viewport():
     """Draw Feather Mode viewport overlays (antialiased, occlusion-aware):
     0. Feather Select: faint fill on every unpicked card (no wires)
     1. Feather Select: violet fill on picked feathers, incl. their mirror copies
-    2. Feather Select: hovered feather — the only one with outline, spline and arrows
+    2. Feather Select: hovered feather — fill + outline of its (posed) card
     3. Vertices / Splines: Root-to-Tip direction chevrons along visible feather chains
 
     Everything draws twice: depth-tested at full strength, then the hidden parts (behind the body
@@ -5403,28 +5678,41 @@ def _draw_feather_directions_viewport():
     hovering = feather_select and _HOVER["guide"] == guide_obj.name and 0 <= hov_idx < len(chains)
     picked = set(get_picked_chains(guide_obj)) if feather_select else set()
 
-    # ── 0. Feather Select: every unpicked card gets a very faint fill (no wires) ─
+    # ── 0. Feather Select: unpicked cards get a faint fill (no wires) — their selection set's
+    #       colour when they're in a shown set, the Unpicked Fill colour otherwise ─────────────
     if feather_select and out_obj is not None and out_obj.data is not None and obj_cache:
         fill_rgba = tuple(look.unpicked_fill_color)
-        if fill_rgba[3] > 0.0:
-            fill_key = (
-                obj_cache.get("gen_id"),
-                frozenset(picked),
-                tuple(round(x, 4) for row in out_obj.matrix_world for x in row),
-                _coords_signature(shown_coords) if shown_coords is not None else None,
-            )
-            cached_fill = obj_cache.get("unpicked_fill")
-            if cached_fill is None or cached_fill[0] != fill_key:
-                tris = []
-                for ranges in (obj_cache.get("chain_ranges") or [], obj_cache.get("mirror_ranges") or []):
-                    for rng in ranges:
-                        if rng[0] not in picked:
-                            _append_chain_card_geometry(out_obj, rng, out_obj.matrix_world, tris, [], coords=shown_coords)
-                batch = batch_for_shader(tri_shader, 'TRIS', {"pos": tris}) if tris else None
-                cached_fill = (fill_key, batch)
-                obj_cache["unpicked_fill"] = cached_fill
-            if cached_fill[1] is not None:
-                items.append(('TRIS', cached_fill[1], fill_rgba, 0.0))
+        sets = [(i, tuple(st.color)) for i, st in enumerate(fprops.feather_sets) if st.show]
+        masks = chain_set_masks(guide_obj)
+        fill_key = (
+            obj_cache.get("gen_id"),
+            frozenset(picked),
+            tuple(round(x, 4) for row in out_obj.matrix_world for x in row),
+            _coords_signature(shown_coords) if shown_coords is not None else None,
+            tuple(masks.tolist()),
+            tuple(sets),
+            fill_rgba,
+        )
+        cached_fill = obj_cache.get("unpicked_fill")
+        if cached_fill is None or cached_fill[0] != fill_key:
+            groups = {}  # rgba -> tris
+            for ranges in (obj_cache.get("chain_ranges") or [], obj_cache.get("mirror_ranges") or []):
+                for rng in ranges:
+                    c = rng[0]
+                    if c in picked:
+                        continue
+                    m = int(masks[c]) if 0 <= c < len(masks) else 0
+                    rgba = next(((col[0], col[1], col[2], max(0.12, col[3] * 0.35))
+                                 for i, col in sets if m & (1 << i)), fill_rgba)
+                    if rgba[3] <= 0.0:
+                        continue
+                    _append_chain_card_geometry(out_obj, rng, out_obj.matrix_world,
+                                                groups.setdefault(rgba, []), [], coords=shown_coords)
+            batches = [(rgba, batch_for_shader(tri_shader, 'TRIS', {"pos": tris})) for rgba, tris in groups.items() if tris]
+            cached_fill = (fill_key, batches)
+            obj_cache["unpicked_fill"] = cached_fill
+        for rgba, batch in cached_fill[1]:
+            items.append(('TRIS', batch, rgba, 0.0))
 
     # ── 1. Picked feather(s) in Feather Select: soft violet fill only ────────
     if picked:
@@ -5443,16 +5731,7 @@ def _draw_feather_directions_viewport():
         add_tris(t, faded(hov_rgba, look.hover_fill))
         if look.outline_width > 0.0:
             add_lines(w, faded(hov_rgba, hov_rgba[3] * 0.65), look.outline_width)
-        xform = (refl_world @ mw) if (mirrored and refl_world is not None) else mw
-        pts = [xform @ Vector(verts_co[vi]) for vi in chains[hov_idx][0]]
-        add_lines(spline_lines(pts), hov_rgba, look.spline_width)
-        v_chain, e_chain = chains[hov_idx]
-        if fprops.show_direction_overlay and len(v_chain) >= 2 and e_chain:
-            lines, root, tip = chevrons(v_chain, e_chain, xform)
-            add_lines(lines, tuple(look.arrow_color), look.arrow_width)
-            if look.point_size > 0.0:
-                add_points([root], tuple(look.root_color), look.point_size)
-                add_points([tip], tuple(look.tip_color), look.point_size)
+        # Only the (posed) card: the guide spline and its arrows sit at the unposed position
 
     # ── 3. Direction chevrons on every visible feather (not while picking) ───
     if fprops.show_direction_overlay and not feather_select:
@@ -5564,9 +5843,13 @@ def _selected_chain_edge_values(guide_obj, attr_name):
 
 def _write_selected_chains_edge_attr(guide_obj, attr_name, attr_type, fn):
     """Set edge attribute `attr_name` on every edge of the selected feathers to `fn(old_value)`."""
+    return _write_chains_edge_attr(guide_obj, _get_selected_chain_indices(guide_obj), attr_name, attr_type, fn)
+
+
+def _write_chains_edge_attr(guide_obj, sel, attr_name, attr_type, fn):
+    """Set edge attribute `attr_name` on every edge of feathers `sel` to `fn(old_value)`."""
     chains = _get_guide_chains_fast(guide_obj)
-    sel = _get_selected_chain_indices(guide_obj)
-    edge_ids = [ei for ci in sel for ei in chains[ci][1]]
+    edge_ids = [ei for ci in sel if 0 <= ci < len(chains) for ei in chains[ci][1]]
     if not edge_ids:
         return 0
     if guide_obj.mode == 'EDIT':
@@ -5603,6 +5886,88 @@ class ARANTOOLS_OT_feather_set_mirror(Operator):
             return {'CANCELLED'}
         regenerate_feather_object(guide_obj, force_full_rebuild=True)
         return {'FINISHED'}
+
+
+CENTRE_OVERLAP_DEFAULT = 0.3
+
+
+def centre_line_feathers(guide_obj, overlap=CENTRE_OVERLAP_DEFAULT):
+    """Mirrored feathers that lie across the mirror plane, so their mirror copy lands on top of them.
+
+    A feather counts when at least `overlap` of its card (by vertices) sits inside the span its
+    own copy covers across the plane — a feather on the centre line pointing along it, doubled.
+    Feathers that only touch the plane at the base (pointing sideways from the centre) don't.
+    Read-only (safe in draw); cached per generation."""
+    fprops = guide_obj.arantools_feather
+    out_obj = fprops.output_object
+    obj_cache = _RUNTIME_CACHE.get(guide_obj.name)
+    if not fprops.use_mirror or out_obj is None or not obj_cache or not obj_cache.get("mirror_ranges"):
+        return []
+    key = (obj_cache.get("gen_id"), round(overlap, 4), len(out_obj.data.vertices))
+    hit = obj_cache.get("centre_feathers")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    me = out_obj.data
+    n = len(me.vertices)
+    co = np.empty(n * 3, dtype=np.float64)
+    (me.shape_keys.reference_key.data if me.shape_keys else me.vertices).foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    out_mw = out_obj.matrix_world
+    rm = np.array(out_mw.inverted_safe() @ _get_mirror_reflection_matrix(fprops) @ out_mw)
+    m3 = np.eye(3) - rm[:3, :3]
+    plane_n = m3[:, int(np.argmax(np.linalg.norm(m3, axis=0)))]
+    plane_n = plane_n / max(np.linalg.norm(plane_n), 1e-12)
+    plane_c = float(plane_n @ rm[:3, 3]) * 0.5
+    mirrored = {r[0] for r in obj_cache["mirror_ranges"]}
+    found = []
+    for c_idx, v0, v1, *_ in obj_cache.get("chain_ranges") or []:
+        if c_idx not in mirrored or v1 > n or v1 <= v0:
+            continue
+        sd = co[v0:v1] @ plane_n - plane_c
+        lo, hi = float(sd.min()), float(sd.max())
+        if lo >= 0.0 or hi <= 0.0:
+            continue
+        if float(((sd >= -hi) & (sd <= -lo)).mean()) >= overlap:
+            found.append(c_idx)
+    obj_cache["centre_feathers"] = (key, found)
+    return found
+
+
+class ARANTOOLS_OT_feather_unmirror_centre(Operator):
+    bl_idname = "arantools.feather_unmirror_centre"
+    bl_label = "Unmirror Centre Feathers"
+    bl_description = (
+        "Turn the mirror copy off on feathers that lie across the mirror line: their copy lands on "
+        "top of them, doubling the feather (and Fix Overlaps has to split the two apart)"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    overlap: FloatProperty(
+        name="Overlap", default=CENTRE_OVERLAP_DEFAULT, min=0.05, max=1.0, subtype='FACTOR',
+        description="How much of a feather must lie over its own mirror copy to count as doubled",
+    )
+
+    def execute(self, context):
+        guide_obj = get_feather_guide_from_context(context)
+        if guide_obj is None:
+            return {'CANCELLED'}
+        found = centre_line_feathers(guide_obj, self.overlap)
+        if not found:
+            self.report({'INFO'}, "No feather lies across the mirror line.")
+            return {'CANCELLED'}
+        _write_chains_edge_attr(guide_obj, found, "feather_mirror", 'BOOLEAN', lambda _v: False)
+        regenerate_feather_object(guide_obj, force_full_rebuild=True)
+        self.report({'INFO'}, f"Mirror copy off on {len(found)} centre feather(s). Re-run Fix Overlaps.")
+        return {'FINISHED'}
+
+
+def draw_centre_feathers_hint(layout, guide_obj):
+    """One row: how many feathers are doubled on the mirror line, with the Unmirror button."""
+    found = centre_line_feathers(guide_obj)
+    if found:
+        row = layout.row(align=True)
+        row.label(text=f"{len(found)} feathers doubled on the mirror line", icon='MOD_MIRROR')
+        row.operator("arantools.feather_unmirror_centre", text="Unmirror")
 
 
 class ARANTOOLS_OT_feather_mirror_card(Operator):
@@ -5876,7 +6241,7 @@ def draw_feather_cards_ui(layout, context):
             picked = get_picked_chains(guide_obj)
             pick_box = layout.box()
             p_col = pick_box.column(align=True)
-            p_col.label(text="Hover a feather, click to edit it", icon='RESTRICT_SELECT_OFF')
+            p_col.label(text="Click picks  •  Ctrl+Click edits", icon='RESTRICT_SELECT_OFF')
             hint = p_col.row(align=True)
             hint.enabled = False
             if picked:
@@ -5886,12 +6251,16 @@ def draw_feather_cards_ui(layout, context):
                 cc.operator("arantools.feather_pick_confirm", text="Confirm", icon='CHECKMARK')
                 cc.operator("arantools.feather_pick_cancel", text="Cancel", icon='X')
             else:
-                hint.label(text="Shift+Click or drag a box to pick several")
+                hint.label(text="Shift+Click, box or Ctrl+A to pick several")
             p_col.separator(factor=0.3)
             p_col.operator("arantools.feather_add_chain", text="Add Feather", icon='ADD')
+            draw_selection_sets(layout, context, guide_obj)
+            from . import feather_overlaps  # late import: feather_overlaps imports this module
+            feather_overlaps.draw_fix_overlaps_ui(layout, context, guide_obj)
 
         # ── CASE 2b: SPLINES MODE (Entire-Feather Controls Only) ─────────────
         elif in_feather_submode:
+            draw_selection_sets(layout, context, guide_obj)
             sel_chains = _get_selected_chain_indices(guide_obj)
             n_sel = len(sel_chains)
 
@@ -6054,6 +6423,10 @@ def draw_feather_cards_ui(layout, context):
         from . import feather_rig  # late import: feather_rig imports this module
         feather_rig.draw_rig_ui(layout, context, guide_obj)
 
+    elif ui.panel_tab == 'NORMALS':
+        from . import feather_normals  # late import: feather_normals imports this module
+        feather_normals.draw_normals_ui(layout, context, guide_obj)
+
     # ========================================================================
     # TAB B: ADVANCED (Surface Projection, Baking, Mirror & Scene Setup)
     # ========================================================================
@@ -6118,6 +6491,8 @@ def draw_feather_cards_ui(layout, context):
         sub.enabled = fprops.use_mirror
         sub.prop(fprops, "mirror_object", text="")
         ocol.prop(fprops, "random_flip", text="Random Flip", slider=True)
+        if fprops.use_mirror:
+            draw_centre_feathers_hint(ocol, guide_obj)
         if fprops.use_mirror and out_obj is not None and any(
             m.type == 'MIRROR' and m.show_viewport for m in out_obj.modifiers
         ):
@@ -6157,6 +6532,7 @@ classes = (
     ARANTOOLS_PG_FeatherLook,
     ARANTOOLS_OT_feather_look_reset,
     ARANTOOLS_PG_FeatherMeshSlot,
+    ARANTOOLS_PG_FeatherSet,
     ARANTOOLS_PG_FeatherObject,
     ARANTOOLS_PG_FeatherSceneUI,
     ARANTOOLS_UL_FeatherAdmittedList,
@@ -6167,9 +6543,16 @@ classes = (
     ARANTOOLS_OT_feather_pick,
     ARANTOOLS_OT_feather_pick_confirm,
     ARANTOOLS_OT_feather_box_pick,
+    ARANTOOLS_OT_feather_pick_all,
+    ARANTOOLS_OT_feather_set_new,
+    ARANTOOLS_OT_feather_set_delete,
+    ARANTOOLS_OT_feather_set_assign,
+    ARANTOOLS_OT_feather_set_select,
+    ARANTOOLS_UL_FeatherSets,
     ARANTOOLS_OT_feather_pick_cancel,
     ARANTOOLS_OT_feather_hover,
     ARANTOOLS_OT_feather_set_mirror,
+    ARANTOOLS_OT_feather_unmirror_centre,
     ARANTOOLS_OT_feather_mirror_card,
     ARANTOOLS_OT_feather_duplicate_selected,
     ARANTOOLS_OT_feather_delete_selected,

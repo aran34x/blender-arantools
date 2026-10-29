@@ -36,6 +36,8 @@ from . import feather_overlaps
 _importlib.reload(feather_overlaps)
 from . import feather_rig
 _importlib.reload(feather_rig)
+from . import feather_normals
+_importlib.reload(feather_normals)
 
 
 _PANEL_SPACE = 'VIEW_3D'
@@ -2383,6 +2385,7 @@ def register():
     feather_cards.register()
     feather_overlaps.register()
     feather_rig.register()
+    feather_normals.register()
 
     bpy.types.Scene.arantools_active_tab = bpy.props.EnumProperty(
         items=[
@@ -2436,6 +2439,7 @@ def unregister():
         except Exception:
             pass
     for _mod in (
+        feather_normals,
         feather_rig,
         feather_overlaps,
         feather_cards,
