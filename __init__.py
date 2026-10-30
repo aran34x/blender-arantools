@@ -14,6 +14,9 @@ from bpy.types import Panel
 from . import rigging
 from . import auto_weights
 from . import animation
+from . import inertia
+from . import jiggle_wave
+from . import mirror_anim
 from . import naming
 from . import weight_tools
 from . import organization
@@ -126,6 +129,10 @@ _TOOL_REGISTRY = [
     ('bone_renamer',   'Bone Renamer',           'Rename bones using a custom token-based format string with auto-counters',        'NAMING',       'SORTALPHA',          '_draw_t_bone_renamer',   False),
     ('anim_org',       'Animation Organization', 'Manage an armature\'s actions: list, create (with Fake User), and auto-set the timeline from a "_NNN" duration suffix', 'ANIMATION', 'ACTION',           '_draw_t_anim_org',       False),
     ('spring_smooth',  'Spring Smooth Curves',   'Damped-spring resample of selected pose bones\' transform curves. Smooths motion between keyframes while preserving stop points', 'ANIMATION', 'IPO_BOUNCE',     '_draw_t_spring_smooth',  False),
+    ('inertia_fix',    'Inertia Fix',            'Weighted inertia that moves your existing keys and re-aims handles instead of baking samples. Loop-aware', 'ANIMATION', 'FORCE_DRAG', '_draw_t_inertia_fix', False),
+    ('jiggle_bake',    'Jiggle Bake (Loop)',     'Simulate jiggle physics on chosen bones over the scene frame range and bake a seamless loop. Every run restarts from the original animation', 'ANIMATION', 'FORCE_HARMONIC', '_draw_t_jiggle_bake', False),
+    ('wave_bake',      'Wave Bake (Chain)',      'Bake a looping travelling wave along the selected bone chain. Every run restarts from the original animation', 'ANIMATION', 'MOD_WAVE', '_draw_t_wave_bake', False),
+    ('mirror_anim',    'Mirror Animation',       'Copy the keys of the selected bones onto their mirror bones (.L/.R, _l/_r). Keys and handles are copied, not resampled', 'ANIMATION', 'MOD_MIRROR', '_draw_t_mirror_anim', False),
     ('noise_bones',    'Noise on Bones',         'Add procedural noise FCurve modifiers to pose bones for organic motion',          'ANIMATION',    'FORCE_TURBULENCE',   '_draw_t_noise_bones',    False),
     ('anim_loop',      'Animation Loop Tools',   'Tools for looping animations', 'ANIMATION', 'FILE_REFRESH', '_draw_t_anim_loop', False),
     ('decal_projector', 'Decal Projector',       'Project the active texture from an active plane onto selected meshes, and bake it into a new image.', 'BAKING', 'IMAGE_PLANE', '_draw_t_decal_projector', False),
@@ -2167,6 +2174,115 @@ class ARANTOOLS_PT_main(Panel):
         col.operator("arantools.decimate_smooth_curves",
                      text="Decimate Only", icon='SHARPCURVE')
 
+    def _draw_t_inertia_fix(self, layout, context):
+        col = layout.column(align=True)
+        col.label(text='Select bones (Pose) or objects.', icon='INFO')
+        col.label(text='Tweak live in Adjust Last Operation.')
+        col.prop(context.scene, 'arantools_time_scale', slider=True)
+        row = col.row()
+        row.scale_y = 1.4
+        row.operator('arantools.inertia_fix', text='Inertia Fix...', icon='FORCE_DRAG')
+
+    def _draw_t_jiggle_bake(self, layout, context):
+        scene = context.scene
+        ob = context.active_object
+        col = layout.column(align=True)
+        if ob is None or ob.type != 'ARMATURE':
+            col.label(text="Select an armature.", icon='ERROR')
+            return
+        col.label(text=f"Loop range: {scene.frame_start} - {scene.frame_end}", icon='TIME')
+        col.prop(scene, 'arantools_time_scale', slider=True)
+
+        # -- Groups --
+        row = col.row()
+        row.template_list("ARANTOOLS_UL_JiggleGroups", "", ob, "arantools_jiggle_groups",
+                          ob, "arantools_jiggle_group_index", rows=3)
+        side = row.column(align=True)
+        side.operator("arantools.jiggle_add_group", text="", icon='ADD')
+        side.operator("arantools.jiggle_remove_group", text="", icon='REMOVE')
+
+        gs = ob.arantools_jiggle_groups
+        gi = ob.arantools_jiggle_group_index
+        if not (0 <= gi < len(gs)):
+            col.label(text="Add a group to start.", icon='INFO')
+            return
+        grp = gs[gi]
+        p = grp.settings
+
+        # -- Bones of active group --
+        box = col.box()
+        box.label(text=f"Bones in '{grp.name}':", icon='BONE_DATA')
+        box.template_list("ARANTOOLS_UL_JiggleBones", "", grp, "bones",
+                          grp, "bone_index", rows=3)
+        row = box.row(align=True)
+        row.operator("arantools.jiggle_add_bones", text="Add Selected", icon='ADD')
+        row.operator("arantools.jiggle_remove_bones", text="Remove", icon='REMOVE')
+        row.operator("arantools.jiggle_select_bones", text="", icon='RESTRICT_SELECT_OFF')
+
+        # -- Settings of active group --
+        col.separator()
+        col.label(text=f"Settings for '{grp.name}':", icon='PREFERENCES')
+        col.prop(p, "weight")
+        col.prop(p, "response")
+        col.prop(p, "damping", slider=True)
+        col.prop(p, "strength", slider=True)
+        col.prop(p, "gravity")
+        col.prop(p, "max_angle")
+        col.prop(p, "limit_softness", slider=True)
+        col.prop(p, "substeps")
+        col.separator()
+        r = col.row(align=True)
+        r.scale_y = 1.4
+        o = r.operator("arantools.jiggle_bake", text="Bake All Groups", icon='FORCE_HARMONIC')
+        o.only_active = False
+        o = r.operator("arantools.jiggle_bake", text="Active Only", icon='GROUP_BONE')
+        o.only_active = True
+        row = col.row(align=True)
+        o = row.operator("arantools.rot_bake_restore", text="Restore Original", icon='LOOP_BACK')
+        o.kind = 'JIGGLE'
+        o = row.operator("arantools.rot_bake_commit", text="Keep Result", icon='CHECKMARK')
+        o.kind = 'JIGGLE'
+    def _draw_t_mirror_anim(self, layout, context):
+        col = layout.column(align=True)
+        col.label(text='Select bones (Pose Mode).', icon='INFO')
+        col.label(text='Mirror bones: .L/.R, _l/_r, Left/Right.')
+        row = col.row()
+        row.scale_y = 1.4
+        row.operator('arantools.mirror_anim', text='Mirror to Other Side', icon='MOD_MIRROR')
+
+    def _draw_t_wave_bake(self, layout, context):
+        scene = context.scene
+        p = scene.arantools_wave
+        col = layout.column(align=True)
+        col.label(text=f"Loop range: {scene.frame_start} - {scene.frame_end}", icon='TIME')
+        col.label(text="Selected bones = chain (root to tip).", icon='INFO')
+        col.prop(p, "cycles", text="Frequency (x)")
+        col.prop(p, "phase_mode", text="Shape")
+        if p.phase_mode == 'WAVES':
+            col.prop(p, "chain_waves", text="Waves Along Chain")
+        else:
+            col.prop(p, "phase", text="Delay / Bone")
+        col.prop(p, "amplitude")
+        col.prop(p, "tip_scale")
+        col.prop(p, "z_offset")
+        col.prop(p, "key_mode")
+        if p.key_mode == 'STEPS':
+            col.prop(p, "key_step")
+        else:
+            col.prop(p, "snap_keys")
+        row = col.row(align=True)
+        row.prop(p, "reverse", toggle=True)
+        row.prop(p, "additive", toggle=True)
+        col.separator()
+        r = col.row()
+        r.scale_y = 1.4
+        r.operator("arantools.wave_bake", icon='MOD_WAVE')
+        row = col.row(align=True)
+        o = row.operator("arantools.rot_bake_restore", text="Restore Original", icon='LOOP_BACK')
+        o.kind = 'WAVE'
+        o = row.operator("arantools.rot_bake_commit", text="Keep Result", icon='CHECKMARK')
+        o.kind = 'WAVE'
+
     def _draw_t_noise_bones(self, layout, context):
         scene = context.scene
         col   = layout.column(align=True)
@@ -2367,6 +2483,9 @@ def register():
     rigging.register()
     auto_weights.register()
     animation.register()
+    inertia.register()
+    jiggle_wave.register()
+    mirror_anim.register()
     naming.register()
     weight_tools.register()
     organization.register()
@@ -2401,6 +2520,14 @@ def register():
             ('EXTRAS',        "", "Extras",               'PLUS',               8),
         ],
         default='HAIRCARDS',
+    )
+
+    bpy.types.Scene.arantools_time_scale = bpy.props.FloatProperty(
+        name="Time Scale",
+        description="Global physics time scale for Jiggle and Inertia bakes. "
+                    "1 = real time, 0.5 = calculated in half-speed slow motion "
+                    "(softer, lazier, bigger swings), 2 = fast-forward",
+        default=1.0, min=0.05, soft_min=0.1, soft_max=2.0, max=10.0,
     )
 
     bpy.types.Scene.arantools_search = bpy.props.StringProperty(
@@ -2439,6 +2566,9 @@ def unregister():
         except Exception:
             pass
     for _mod in (
+        mirror_anim,
+        jiggle_wave,
+        inertia,
         feather_normals,
         feather_rig,
         feather_overlaps,
